@@ -343,22 +343,48 @@ func cleanHTML(input string) string {
 	f = func(n *html.Node) {
 		if n.Type == html.ElementNode {
 			tag := strings.ToLower(n.Data)
-			if tag == "style" || tag == "script" || tag == "head" {
+			if tag == "style" || tag == "script" || tag == "head" || tag == "meta" || tag == "link" {
 				return
 			}
 
 			allowed := false
 			switch tag {
-			case "p", "br", "h1", "h2", "h3", "h4", "h5", "h6", "b", "i", "strong", "em", "ul", "ol", "li", "a", "img":
+			case "p", "br", "h1", "h2", "h3", "h4", "h5", "h6", "b", "i", "strong", "em", "ul", "ol", "li", "a", "img", "blockquote", "code", "pre", "hr":
 				allowed = true
+			}
+
+			// Logical Filtering: Skip common footer noise
+			if tag == "a" {
+				var linkText strings.Builder
+				var findText func(*html.Node)
+				findText = func(m *html.Node) {
+					if m.Type == html.TextNode {
+						linkText.WriteString(m.Data)
+					}
+					for c := m.FirstChild; c != nil; c = c.NextSibling {
+						findText(c)
+					}
+				}
+				findText(n)
+				txt := strings.ToLower(linkText.String())
+				if strings.Contains(txt, "unsubscribe") || strings.Contains(txt, "view in browser") || strings.Contains(txt, "update preferences") {
+					return
+				}
 			}
 
 			if allowed {
 				buf.WriteString("<")
 				buf.WriteString(n.Data)
 				for _, a := range n.Attr {
-					if strings.ToLower(a.Key) == "href" || strings.ToLower(a.Key) == "src" {
-						buf.WriteString(fmt.Sprintf(" %s=\"%s\"", a.Key, a.Val))
+					key := strings.ToLower(a.Key)
+					if key == "href" || key == "src" {
+						// Skip cid: images as they won't render in RSS readers
+						if key == "src" && strings.HasPrefix(strings.ToLower(a.Val), "cid:") {
+							continue
+						}
+						buf.WriteString(fmt.Sprintf(" %s=\"%s\"", a.Key, html.EscapeString(a.Val)))
+					} else if key == "alt" || key == "title" {
+						buf.WriteString(fmt.Sprintf(" %s=\"%s\"", a.Key, html.EscapeString(a.Val)))
 					}
 				}
 				buf.WriteString(">")
@@ -368,13 +394,23 @@ func cleanHTML(input string) string {
 				f(c)
 			}
 
-			if allowed && n.Data != "br" && n.Data != "img" {
+			if allowed && n.Data != "br" && n.Data != "img" && n.Data != "hr" {
 				buf.WriteString("</")
 				buf.WriteString(n.Data)
 				buf.WriteString(">")
 			}
 		} else if n.Type == html.TextNode {
-			buf.WriteString(n.Data)
+			// Collapse excessive whitespace common in newsletter HTML
+			text := n.Data
+			if strings.TrimSpace(text) == "" {
+				if strings.Contains(text, "\n") {
+					buf.WriteString("\n")
+				} else {
+					buf.WriteString(" ")
+				}
+			} else {
+				buf.WriteString(html.EscapeString(text))
+			}
 		} else {
 			for c := n.FirstChild; c != nil; c = c.NextSibling {
 				f(c)
@@ -382,7 +418,13 @@ func cleanHTML(input string) string {
 		}
 	}
 	f(doc)
-	return buf.String()
+
+	// Final cleanup: remove triple newlines and trim
+	res := buf.String()
+	for strings.Contains(res, "\n\n\n") {
+		res = strings.ReplaceAll(res, "\n\n\n", "\n\n")
+	}
+	return strings.TrimSpace(res)
 }
 
 func parseFrom(from string) (name, email string) {
