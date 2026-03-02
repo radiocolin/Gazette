@@ -111,17 +111,27 @@ func withRetry[T any](fn func() (T, error)) (T, error) {
 			return res, nil
 		}
 
-		if gerr, ok := err.(*googleapi.Error); ok && gerr.Code == 429 {
-			retryAfter := gerr.Header.Get("Retry-After")
-			waitDur := 2 * time.Second // Default fallback
-			if retryAfter != "" {
-				if d, err := strconv.Atoi(retryAfter); err == nil {
-					waitDur = time.Duration(d) * time.Second
-				} else if t, err := http.ParseTime(retryAfter); err == nil {
-					waitDur = time.Until(t)
+		shouldRetry := false
+		waitDur := time.Duration(1<<i) * time.Second
+
+		if gerr, ok := err.(*googleapi.Error); ok {
+			if gerr.Code == 429 {
+				shouldRetry = true
+				retryAfter := gerr.Header.Get("Retry-After")
+				if retryAfter != "" {
+					if d, err := strconv.Atoi(retryAfter); err == nil {
+						waitDur = time.Duration(d) * time.Second
+					} else if t, err := http.ParseTime(retryAfter); err == nil {
+						waitDur = time.Until(t)
+					}
 				}
+			} else if gerr.Code >= 500 {
+				shouldRetry = true
 			}
-			log.Printf("Rate limited (429). Waiting %v per Retry-After header...", waitDur)
+		}
+
+		if shouldRetry {
+			log.Printf("API Error (attempt %d/5): %v. Retrying in %v...", i+1, err, waitDur)
 			time.Sleep(waitDur)
 			continue
 		}
@@ -131,26 +141,65 @@ func withRetry[T any](fn func() (T, error)) (T, error) {
 }
 
 func pollGmail(ctx context.Context) {
-	ticker := time.NewTicker(time.Duration(config.Gmail.PollingInterval) * time.Second)
-	defer ticker.Stop()
+	interval := time.Duration(config.Gmail.PollingInterval) * time.Second
 
-	for {
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	// Goroutine 1: fetch new messages at every polling interval
+	go func() {
+		defer wg.Done()
+
 		gmailMu.RLock()
 		svc := gmailSvc
 		gmailMu.RUnlock()
-
 		if svc != nil {
-			fetchMessages(ctx, svc)
+			fetchNewMessages(ctx, svc)
 		} else {
 			log.Printf("Waiting for authentication...")
 		}
 
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				gmailMu.RLock()
+				svc := gmailSvc
+				gmailMu.RUnlock()
+				if svc != nil {
+					fetchNewMessages(ctx, svc)
+				} else {
+					log.Printf("Waiting for authentication...")
+				}
+			}
 		}
-	}
+	}()
+
+	// Goroutine 2: sync read status every 10x polling interval
+	go func() {
+		defer wg.Done()
+
+		ticker := time.NewTicker(interval * 10)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				gmailMu.RLock()
+				svc := gmailSvc
+				gmailMu.RUnlock()
+				if svc != nil {
+					syncReadStatus(svc)
+				}
+			}
+		}
+	}()
+
+	wg.Wait()
 }
 
 type job struct {
@@ -158,8 +207,157 @@ type job struct {
 	msg   *gmail.Message
 }
 
-func fetchMessages(ctx context.Context, srv *gmail.Service) {
-	log.Printf("Fetching messages...")
+func fetchNewMessages(ctx context.Context, svc *gmail.Service) {
+	cache.mu.RLock()
+	histID := cache.HistoryID
+	cache.mu.RUnlock()
+
+	if histID == 0 {
+		log.Printf("First run: performing full message sync")
+		fullMessageSync(svc)
+		profile, err := withRetry(func() (*gmail.Profile, error) {
+			return svc.Users.GetProfile("me").Do()
+		})
+		if err != nil {
+			log.Printf("Error getting profile for history ID: %v", err)
+			return
+		}
+		cache.mu.Lock()
+		cache.HistoryID = profile.HistoryId
+		cache.mu.Unlock()
+		cache.Save()
+		log.Printf("Stored history ID: %d", profile.HistoryId)
+	} else {
+		ok := incrementalSync(svc)
+		if !ok {
+			log.Printf("Falling back to full message sync")
+			fullMessageSync(svc)
+			profile, err := withRetry(func() (*gmail.Profile, error) {
+				return svc.Users.GetProfile("me").Do()
+			})
+			if err != nil {
+				log.Printf("Error getting profile for history ID: %v", err)
+				return
+			}
+			cache.mu.Lock()
+			cache.HistoryID = profile.HistoryId
+			cache.mu.Unlock()
+			cache.Save()
+			log.Printf("Stored history ID: %d", profile.HistoryId)
+		}
+	}
+}
+
+// incrementalSync fetches history since cache.HistoryID.
+// Returns false if history has expired and a full sync is needed.
+func incrementalSync(svc *gmail.Service) bool {
+	cache.mu.RLock()
+	histID := cache.HistoryID
+	cache.mu.RUnlock()
+
+	log.Printf("Incremental sync from history ID %d", histID)
+
+	newItems := false
+	changed := false
+	pageToken := ""
+	var latestHistoryID uint64
+
+	for {
+		req := svc.Users.History.List("me").
+			StartHistoryId(histID).
+			HistoryTypes("messageAdded", "labelAdded", "labelRemoved").
+			MaxResults(500)
+		if pageToken != "" {
+			req = req.PageToken(pageToken)
+		}
+
+		resp, err := withRetry(func() (*gmail.ListHistoryResponse, error) {
+			return req.Do()
+		})
+		if err != nil {
+			if gerr, ok := err.(*googleapi.Error); ok && gerr.Code == 404 {
+				log.Printf("History expired (404), falling back to full sync")
+				return false
+			}
+			log.Printf("Error fetching history: %v", err)
+			return true
+		}
+
+		if resp.HistoryId > latestHistoryID {
+			latestHistoryID = resp.HistoryId
+		}
+
+		for _, record := range resp.History {
+			for _, added := range record.MessagesAdded {
+				msgID := added.Message.Id
+				cache.mu.RLock()
+				item, exists := cache.Items[msgID]
+				fullyProcessed := exists && item.Body != ""
+				cache.mu.RUnlock()
+
+				if fullyProcessed {
+					continue
+				}
+
+				fullMsg, err := withRetry(func() (*gmail.Message, error) {
+					return svc.Users.Messages.Get("me", msgID).Format("full").Do()
+				})
+				if err != nil {
+					log.Printf("Error fetching message %s: %v", msgID, err)
+					continue
+				}
+				processMessage(svc, fullMsg)
+				newItems = true
+			}
+
+			for _, removed := range record.LabelsRemoved {
+				for _, lbl := range removed.LabelIds {
+					if lbl == "UNREAD" {
+						cache.mu.Lock()
+						if item, exists := cache.Items[removed.Message.Id]; exists && item.Body != "" && !item.IsRead {
+							item.IsRead = true
+							changed = true
+						}
+						cache.mu.Unlock()
+					}
+				}
+			}
+
+			for _, added := range record.LabelsAdded {
+				for _, lbl := range added.LabelIds {
+					if lbl == "UNREAD" {
+						cache.mu.Lock()
+						if item, exists := cache.Items[added.Message.Id]; exists && item.Body != "" && item.IsRead {
+							item.IsRead = false
+							changed = true
+						}
+						cache.mu.Unlock()
+					}
+				}
+			}
+		}
+
+		pageToken = resp.NextPageToken
+		if pageToken == "" {
+			break
+		}
+	}
+
+	if latestHistoryID > 0 {
+		cache.mu.Lock()
+		cache.HistoryID = latestHistoryID
+		cache.mu.Unlock()
+	}
+
+	if newItems || changed {
+		cache.Save()
+	}
+
+	return true
+}
+
+func fullMessageSync(svc *gmail.Service) {
+	log.Printf("Full message sync...")
 
 	query := ""
 	if config.Gmail.Label != "" {
@@ -173,8 +371,16 @@ func fetchMessages(ctx context.Context, srv *gmail.Service) {
 	const maxToProcess = 500
 
 	for {
+		req := svc.Users.Messages.List("me").MaxResults(500)
+		if query != "" {
+			req = req.Q(query)
+		}
+		if pageToken != "" {
+			req = req.PageToken(pageToken)
+		}
+
 		r, err := withRetry(func() (*gmail.ListMessagesResponse, error) {
-			return srv.Users.Messages.List("me").Q(query).PageToken(pageToken).Do()
+			return req.Do()
 		})
 		if err != nil {
 			log.Printf("Error listing messages: %v", err)
@@ -191,8 +397,7 @@ func fetchMessages(ctx context.Context, srv *gmail.Service) {
 		jobs := make(chan job, len(r.Messages))
 		var wg sync.WaitGroup
 
-		numWorkers := 10
-		for w := 0; w < numWorkers; w++ {
+		for w := 0; w < 10; w++ {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
@@ -200,36 +405,15 @@ func fetchMessages(ctx context.Context, srv *gmail.Service) {
 					m := j.msg
 					cache.mu.RLock()
 					item, exists := cache.Items[m.Id]
+					fullyProcessed := exists && item.Sender != "" && item.Body != ""
 					cache.mu.RUnlock()
 
-					// 1. Check for read status updates if fully processed.
-					// Optimization: If it's already read in cache, don't waste API quota checking it again.
-					if exists && item.Sender != "" && item.Body != "" {
-						if item.IsRead {
-							continue
-						}
-
-						msgMetadata, err := withRetry(func() (*gmail.Message, error) {
-							return srv.Users.Messages.Get("me", m.Id).Format("metadata").Do()
-						})
-						if err == nil {
-							isUnread := false
-							for _, lbl := range msgMetadata.LabelIds {
-								if lbl == "UNREAD" {
-									isUnread = true
-									break
-								}
-							}
-							cache.mu.Lock()
-							item.IsRead = !isUnread
-							cache.mu.Unlock()
-						}
+					if fullyProcessed {
 						continue
 					}
 
-					// 2. Fetch metadata to check sender
 					metadata, err := withRetry(func() (*gmail.Message, error) {
-						return srv.Users.Messages.Get("me", m.Id).Format("metadata").MetadataHeaders("From", "Subject").Do()
+						return svc.Users.Messages.Get("me", m.Id).Format("metadata").MetadataHeaders("From", "Subject").Do()
 					})
 					if err != nil {
 						continue
@@ -246,7 +430,6 @@ func fetchMessages(ctx context.Context, srv *gmail.Service) {
 					}
 					_, email := parseFrom(from)
 
-					// 3. Filters
 					if userEmail != "" && strings.EqualFold(email, userEmail) {
 						if !exists {
 							cache.GetOrCreateItem(m.Id)
@@ -272,16 +455,15 @@ func fetchMessages(ctx context.Context, srv *gmail.Service) {
 						continue
 					}
 
-					// 4. Fetch full content
 					fullMsg, err := withRetry(func() (*gmail.Message, error) {
-						return srv.Users.Messages.Get("me", m.Id).Format("full").Do()
+						return svc.Users.Messages.Get("me", m.Id).Format("full").Do()
 					})
 					if err != nil {
 						continue
 					}
 
 					log.Printf("[%d/%d] PROCESSED: %s", j.index+1, len(r.Messages), subject)
-					processMessage(srv, fullMsg)
+					processMessage(svc, fullMsg)
 					newItems = true
 				}
 			}()
@@ -295,7 +477,7 @@ func fetchMessages(ctx context.Context, srv *gmail.Service) {
 
 		processedCount += len(r.Messages)
 		if processedCount >= maxToProcess {
-			log.Printf("Reached limit of %d messages. Stopping poll.", maxToProcess)
+			log.Printf("Reached limit of %d messages. Stopping.", maxToProcess)
 			break
 		}
 
@@ -309,6 +491,71 @@ func fetchMessages(ctx context.Context, srv *gmail.Service) {
 
 	if newItems {
 		cache.Save()
+	}
+}
+
+func syncReadStatus(svc *gmail.Service) {
+	log.Printf("Syncing read status...")
+
+	query := ""
+	if config.Gmail.Label != "" {
+		query = fmt.Sprintf("label:%s", config.Gmail.Label)
+	}
+
+	unreadIDs := make(map[string]bool)
+	pageToken := ""
+
+	for {
+		req := svc.Users.Messages.List("me").LabelIds("UNREAD").MaxResults(500)
+		if query != "" {
+			req = req.Q(query)
+		}
+		if pageToken != "" {
+			req = req.PageToken(pageToken)
+		}
+
+		r, err := withRetry(func() (*gmail.ListMessagesResponse, error) {
+			return req.Do()
+		})
+		if err != nil {
+			log.Printf("Error listing unread messages: %v", err)
+			return
+		}
+
+		for _, m := range r.Messages {
+			unreadIDs[m.Id] = true
+		}
+
+		pageToken = r.NextPageToken
+		if pageToken == "" {
+			break
+		}
+	}
+
+	log.Printf("Found %d unread messages in Gmail", len(unreadIDs))
+
+	changed := false
+	cache.mu.Lock()
+	for _, item := range cache.Items {
+		if item.Body == "" {
+			continue
+		}
+		inUnreadSet := unreadIDs[item.ID]
+		if !item.IsRead && !inUnreadSet {
+			item.IsRead = true
+			changed = true
+		} else if item.IsRead && inUnreadSet {
+			item.IsRead = false
+			changed = true
+		}
+	}
+	cache.mu.Unlock()
+
+	if changed {
+		cache.Save()
+		log.Printf("Read status synced, cache updated")
+	} else {
+		log.Printf("Read status in sync, no changes needed")
 	}
 }
 

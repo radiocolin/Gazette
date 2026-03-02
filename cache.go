@@ -36,6 +36,7 @@ type Cache struct {
 	ExcludedSenders  map[string]bool          `json:"excluded_senders"`
 	ProcessedThreads map[string]string        `json:"processed_threads"` // ThreadID -> First MessageID
 	NextIntID        uint64                   `json:"next_int_id"`
+	HistoryID        uint64                   `json:"history_id"`
 	mu               sync.RWMutex
 }
 
