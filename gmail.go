@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/net/html"
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
 	"google.golang.org/api/gmail/v1"
@@ -340,22 +341,32 @@ func processMessage(srv *gmail.Service, msg *gmail.Message) {
 	item.Body = cleanNewsletterHTML(item.Body)
 }
 
-func cleanNewsletterHTML(html string) string {
-	// Remove Microsoft Office conditional comments like <!--[if gte mso 9]>...<![endif]-->
-	// These often contain <o:PixelsPerInch>96</o:PixelsPerInch> which confuses preview generators.
-	for {
-		start := strings.Index(html, "<!--[if")
-		if start == -1 {
-			break
-		}
-		relativeEnd := strings.Index(html[start:], "![endif]-->")
-		if relativeEnd == -1 {
-			break
-		}
-		end := start + relativeEnd + 11
-		html = html[:start] + html[end:]
+func cleanNewsletterHTML(rawHTML string) string {
+	doc, err := html.Parse(strings.NewReader(rawHTML))
+	if err != nil {
+		return rawHTML
 	}
-	return html
+
+	// Traversal to remove all comment nodes
+	var removeComments func(*html.Node)
+	removeComments = func(n *html.Node) {
+		for c := n.FirstChild; c != nil; {
+			next := c.NextSibling
+			if c.Type == html.CommentNode {
+				n.RemoveChild(c)
+			} else {
+				removeComments(c)
+			}
+			c = next
+		}
+	}
+	removeComments(doc)
+
+	var buf bytes.Buffer
+	if err := html.Render(&buf, doc); err != nil {
+		return rawHTML
+	}
+	return buf.String()
 }
 
 func collectCids(srv *gmail.Service, msgID string, part *gmail.MessagePart, cidMap map[string]string) {
