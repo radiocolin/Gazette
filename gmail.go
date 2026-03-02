@@ -9,8 +9,10 @@ import (
 	"io"
 	"log"
 	"mime/quotedprintable"
+	"net/http"
 	"net/mail"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -18,6 +20,7 @@ import (
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
 	"google.golang.org/api/gmail/v1"
+	"google.golang.org/api/googleapi"
 	"google.golang.org/api/option"
 )
 
@@ -100,6 +103,32 @@ func saveToken(path string, token *oauth2.Token) {
 	json.NewEncoder(f).Encode(token)
 }
 
+func withRetry[T any](fn func() (T, error)) (T, error) {
+	for i := 0; i < 5; i++ {
+		res, err := fn()
+		if err == nil {
+			return res, nil
+		}
+
+		if gerr, ok := err.(*googleapi.Error); ok && gerr.Code == 429 {
+			retryAfter := gerr.Header.Get("Retry-After")
+			waitDur := 2 * time.Second // Default fallback
+			if retryAfter != "" {
+				if d, err := strconv.Atoi(retryAfter); err == nil {
+					waitDur = time.Duration(d) * time.Second
+				} else if t, err := http.ParseTime(retryAfter); err == nil {
+					waitDur = time.Until(t)
+				}
+			}
+			log.Printf("Rate limited (429). Waiting %v per Retry-After header...", waitDur)
+			time.Sleep(waitDur)
+			continue
+		}
+		return res, err
+	}
+	return fn()
+}
+
 func pollGmail(ctx context.Context) {
 	ticker := time.NewTicker(time.Duration(config.Gmail.PollingInterval) * time.Second)
 	defer ticker.Stop()
@@ -127,26 +156,35 @@ func fetchMessages(ctx context.Context, srv *gmail.Service) {
 	query := fmt.Sprintf("label:%s", config.Gmail.Label)
 	newItems := false
 
+	pageNum := 1
 	pageToken := ""
 	for {
-		call := srv.Users.Messages.List("me").Q(query).MaxResults(500)
-		if pageToken != "" {
-			call.PageToken(pageToken)
-		}
-		r, err := call.Do()
+		log.Printf("Fetching page %d of emails...", pageNum)
+		
+		r, err := withRetry(func() (*gmail.ListMessagesResponse, error) {
+			call := srv.Users.Messages.List("me").Q(query).MaxResults(100)
+			if pageToken != "" {
+				call.PageToken(pageToken)
+			}
+			return call.Do()
+		})
+		
 		if err != nil {
 			log.Printf("Unable to retrieve messages: %v", err)
 			return
 		}
 
-		for _, m := range r.Messages {
+		for i, m := range r.Messages {
+			log.Printf("[%d/%d] Checking message %s", i+1, len(r.Messages), m.Id)
 			cache.mu.RLock()
 			item, exists := cache.Items[m.Id]
 			cache.mu.RUnlock()
 
 			// 1. If it already exists and is fully processed, just check for read status updates
 			if exists && item.Sender != "" && item.Body != "" {
-				msgMetadata, err := srv.Users.Messages.Get("me", m.Id).Format("metadata").Do()
+				msgMetadata, err := withRetry(func() (*gmail.Message, error) {
+					return srv.Users.Messages.Get("me", m.Id).Format("metadata").Do()
+				})
 				if err == nil {
 					isUnread := false
 					for _, lbl := range msgMetadata.LabelIds {
@@ -163,7 +201,9 @@ func fetchMessages(ctx context.Context, srv *gmail.Service) {
 			}
 
 			// 2. Fetch metadata to check sender and if it's a valid newsletter
-			metadata, err := srv.Users.Messages.Get("me", m.Id).Format("metadata").MetadataHeaders("From", "Subject").Do()
+			metadata, err := withRetry(func() (*gmail.Message, error) {
+				return srv.Users.Messages.Get("me", m.Id).Format("metadata").MetadataHeaders("From", "Subject").Do()
+			})
 			if err != nil {
 				log.Printf("Unable to retrieve message metadata %v: %v", m.Id, err)
 				continue
@@ -208,8 +248,10 @@ func fetchMessages(ctx context.Context, srv *gmail.Service) {
 				continue
 			}
 
-			// 5. Process the message
-			fullMsg, err := srv.Users.Messages.Get("me", m.Id).Format("full").Do()
+			// 6. Process the message
+			fullMsg, err := withRetry(func() (*gmail.Message, error) {
+				return srv.Users.Messages.Get("me", m.Id).Format("full").Do()
+			})
 			if err != nil {
 				log.Printf("Unable to retrieve message %v: %v", m.Id, err)
 				continue
@@ -222,8 +264,10 @@ func fetchMessages(ctx context.Context, srv *gmail.Service) {
 
 		pageToken = r.NextPageToken
 		if pageToken == "" {
+			log.Printf("Finished processing all pages.")
 			break
 		}
+		pageNum++
 	}
 
 	if newItems {
