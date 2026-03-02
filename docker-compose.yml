@@ -1,6 +1,7 @@
 services:
-  gazette-bridge:
+  gazette:
     build: .
+    image: gazette:latest
     ports:
       - "8080:8080"
     volumes:

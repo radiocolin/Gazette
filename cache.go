@@ -12,6 +12,7 @@ import (
 
 type Item struct {
 	ID         string            `json:"id"`
+	ThreadID   string            `json:"thread_id"`
 	HexID      string            `json:"hex_id"`
 	IntID      uint64            `json:"int_id"`
 	Sender     string            `json:"sender"`
@@ -30,27 +31,33 @@ type Subscription struct {
 }
 
 type Cache struct {
-	Items           map[string]*Item         `json:"items"`          // Gmail ID -> Item
-	HexToGmailID    map[string]string         `json:"hex_to_gmail"`   // Hex ID -> Gmail ID
-	Subscriptions   map[string]*Subscription `json:"subscriptions"` // Sender Email -> Subscription
-	ExcludedSenders map[string]bool          `json:"excluded_senders"`
-	NextIntID       uint64                   `json:"next_int_id"`
-	mu              sync.RWMutex
+	Items            map[string]*Item         `json:"items"`          // Gmail ID -> Item
+	HexToGmailID     map[string]string         `json:"hex_to_gmail"`   // Hex ID -> Gmail ID
+	Subscriptions    map[string]*Subscription `json:"subscriptions"` // Sender Email -> Subscription
+	ExcludedSenders  map[string]bool          `json:"excluded_senders"`
+	ProcessedThreads map[string]string        `json:"processed_threads"` // ThreadID -> First MessageID
+	NextIntID        uint64                   `json:"next_int_id"`
+	mu               sync.RWMutex
 }
 
 func NewCache() *Cache {
 	c := &Cache{
-		Items:           make(map[string]*Item),
-		HexToGmailID:    make(map[string]string),
-		Subscriptions:   make(map[string]*Subscription),
-		ExcludedSenders: make(map[string]bool),
-		NextIntID:       1,
+		Items:            make(map[string]*Item),
+		HexToGmailID:     make(map[string]string),
+		Subscriptions:    make(map[string]*Subscription),
+		ExcludedSenders:  make(map[string]bool),
+		ProcessedThreads: make(map[string]string),
+		NextIntID:        1,
 	}
 	c.load()
 
+	if c.ProcessedThreads == nil {
+		c.ProcessedThreads = make(map[string]string)
+	}
+
 	// Cleanup existing titles
 	for _, s := range c.Subscriptions {
-		s.Title = strings.Trim(s.Title, "\" '")
+		s.Title = strings.Trim(s.Title, "\" '“”")
 	}
 
 	return c
@@ -118,7 +125,7 @@ func (c *Cache) GetItemByHex(hexID string) *Item {
 func (c *Cache) AddSubscription(email, name string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	name = strings.Trim(name, "\" '")
+	name = strings.Trim(name, "\" '“”")
 	if s, ok := c.Subscriptions[email]; ok {
 		s.Title = name
 	} else {

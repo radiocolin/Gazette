@@ -118,9 +118,11 @@ func pollGmail(ctx context.Context) {
 
 func fetchMessages(ctx context.Context, srv *gmail.Service) {
 	query := fmt.Sprintf("label:%s", config.Gmail.Label)
-	pageToken := ""
 	newItems := false
 
+	// 1. Fetch all message summaries for the label
+	var allMessages []*gmail.Message
+	pageToken := ""
 	for {
 		call := srv.Users.Messages.List("me").Q(query).MaxResults(500)
 		if pageToken != "" {
@@ -131,61 +133,103 @@ func fetchMessages(ctx context.Context, srv *gmail.Service) {
 			log.Printf("Unable to retrieve messages: %v", err)
 			return
 		}
-
-		for _, m := range r.Messages {
-			cache.mu.RLock()
-			item, exists := cache.Items[m.Id]
-			cache.mu.RUnlock()
-			
-			if exists {
-				// Check for read status updates
-				metadata, err := srv.Users.Messages.Get("me", m.Id).Format("metadata").Do()
-				if err == nil {
-					isUnread := false
-					for _, lbl := range metadata.LabelIds {
-						if lbl == "UNREAD" {
-							isUnread = true
-							break
-						}
-					}
-					cache.mu.Lock()
-					item.IsRead = !isUnread
-					cache.mu.Unlock()
-				}
-				continue
-			}
-
-			fullMsg, err := srv.Users.Messages.Get("me", m.Id).Format("full").Do()
-			if err != nil {
-				log.Printf("Unable to retrieve message %v: %v", m.Id, err)
-				continue
-			}
-
-			// Check if sender is excluded
-			from := ""
-			for _, h := range fullMsg.Payload.Headers {
-				if h.Name == "From" {
-					from = h.Value
-					break
-				}
-			}
-			_, email := parseFrom(from)
-			cache.mu.RLock()
-			excluded := cache.ExcludedSenders[email]
-			cache.mu.RUnlock()
-			if excluded {
-				cache.GetOrCreateItem(m.Id)
-				continue
-			}
-
-			processMessage(srv, fullMsg)
-			newItems = true
-		}
-
+		allMessages = append(allMessages, r.Messages...)
 		pageToken = r.NextPageToken
 		if pageToken == "" {
 			break
 		}
+	}
+
+	if len(allMessages) == 0 {
+		return
+	}
+
+	// 2. Group by ThreadID and find the oldest message in each thread
+	// We need to fetch basic metadata to get the dates for sorting
+	type msgInfo struct {
+		msg  *gmail.Message
+		date int64
+	}
+	threads := make(map[string][]msgInfo)
+	
+	log.Printf("Analyzing %d messages for threads...", len(allMessages))
+	for _, m := range allMessages {
+		// We use a small cache check here to avoid over-fetching metadata for things we know
+		cache.mu.RLock()
+		item, exists := cache.Items[m.Id]
+		cache.mu.RUnlock()
+
+		var date int64
+		if exists && item.Timestamp.Unix() > 0 {
+			date = item.Timestamp.UnixMilli()
+		} else {
+			// Fetch minimal metadata to get the internal date
+			meta, err := srv.Users.Messages.Get("me", m.Id).Format("minimal").Do()
+			if err != nil {
+				continue
+			}
+			date = meta.InternalDate
+		}
+		threads[m.ThreadId] = append(threads[m.ThreadId], msgInfo{msg: m, date: date})
+	}
+
+	// 3. Process only the oldest message from each thread
+	for threadID, msgs := range threads {
+		// Find oldest
+		var oldest msgInfo
+		for i, m := range msgs {
+			if i == 0 || m.date < oldest.date {
+				oldest = m
+			}
+		}
+
+		m := oldest.msg
+		cache.mu.RLock()
+		item, exists := cache.Items[m.Id]
+		cache.mu.RUnlock()
+
+		// Skip if this specific message was already fully processed
+		if exists && item.Body != "" && item.Sender != "" {
+			// (Optional: Check read status updates)
+			continue
+		}
+
+		// Process this message
+		fullMsg, err := srv.Users.Messages.Get("me", m.Id).Format("full").Do()
+		if err != nil {
+			log.Printf("Unable to retrieve message %v: %v", m.Id, err)
+			continue
+		}
+
+		// Check if sender is excluded
+		from := ""
+		for _, h := range fullMsg.Payload.Headers {
+			if h.Name == "From" {
+				from = h.Value
+				break
+			}
+		}
+		_, email := parseFrom(from)
+		cache.mu.RLock()
+		excluded := cache.ExcludedSenders[email]
+		cache.mu.RUnlock()
+		
+		if excluded {
+			if !exists {
+				cache.GetOrCreateItem(m.Id)
+			}
+			continue
+		}
+
+		log.Printf("PROCESSING NEWSLETTER: Thread=%s Msg=%s Date=%v", threadID, m.Id, oldest.date)
+		processMessage(srv, fullMsg)
+		
+		// Record that this is the primary message for this thread
+		cache.mu.Lock()
+		cache.ProcessedThreads[threadID] = m.Id
+		cache.mu.Unlock()
+		
+		newItems = true
 	}
 
 	if newItems {
@@ -195,6 +239,7 @@ func fetchMessages(ctx context.Context, srv *gmail.Service) {
 
 func processMessage(srv *gmail.Service, msg *gmail.Message) {
 	item := cache.GetOrCreateItem(msg.Id)
+	item.ThreadID = msg.ThreadId
 	item.Timestamp = time.Unix(msg.InternalDate/1000, 0)
 	item.Snippet = msg.Snippet
 	item.CidMap = make(map[string]string)
@@ -281,13 +326,11 @@ func extractBody(part *gmail.MessagePart) string {
 	if part.Body.Data != "" {
 		data, err := base64.RawURLEncoding.DecodeString(part.Body.Data)
 		if err != nil {
-			// Try with standard padding just in case
 			data, err = base64.URLEncoding.DecodeString(part.Body.Data)
 		}
 		
 		if err == nil {
 			content := string(data)
-			// Check if we need to decode quoted-printable
 			for _, h := range part.Headers {
 				if strings.EqualFold(h.Name, "Content-Transfer-Encoding") && strings.EqualFold(h.Value, "quoted-printable") {
 					decoded, err := io.ReadAll(quotedprintable.NewReader(bytes.NewReader(data)))
@@ -301,7 +344,7 @@ func extractBody(part *gmail.MessagePart) string {
 		}
 	}
 
-	// If it's a multipart, prioritize HTML, then Plain
+	// If it's a multipart, prioritize HTML
 	if strings.HasPrefix(part.MimeType, "multipart/") {
 		var htmlBody, plainBody string
 		for _, subPart := range part.Parts {
@@ -311,8 +354,6 @@ func extractBody(part *gmail.MessagePart) string {
 			} else if subPart.MimeType == "text/plain" && plainBody == "" {
 				plainBody = body
 			} else if strings.HasPrefix(subPart.MimeType, "multipart/") && body != "" {
-				// If we got something from a nested multipart (like multipart/related)
-				// we treat it as potentially the best content if we don't have HTML yet.
 				if htmlBody == "" {
 					htmlBody = body
 				}
