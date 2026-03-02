@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/mail"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -330,20 +331,12 @@ func processMessage(srv *gmail.Service, msg *gmail.Message) {
 	}
 
 	// Extract body and collect CIDs
-	body := extractBody(srv, msg.Id, msg.Payload)
-	item.Body = body
+	item.Body = extractBody(srv, msg.Id, msg.Payload)
 	collectCids(srv, msg.Id, msg.Payload, item.CidMap)
 
 	// Replace CIDs in body with data URIs
 	for cid, dataURI := range item.CidMap {
 		item.Body = strings.ReplaceAll(item.Body, "cid:"+cid, dataURI)
-	}
-
-	// Prepend hidden snippet to force clean preview in RSS readers
-	// This fixes the "96" issue without stripping CSS or layouts.
-	if item.Snippet != "" {
-		safeSnippet := html.EscapeString(item.Snippet)
-		item.Body = fmt.Sprintf("<div style=\"display:none;font-size:1px;color:#fff;line-height:1px;max-height:0px;max-width:0px;opacity:0;overflow:hidden;\">%s</div>\n%s", safeSnippet, item.Body)
 	}
 
 	item.Body = cleanNewsletterHTML(item.Body)
@@ -355,20 +348,13 @@ func cleanNewsletterHTML(rawHTML string) string {
 		return rawHTML
 	}
 
-	// Traversal to remove ONLY comments and XML nodes
+	// Traversal to remove specific MSO comment blocks
 	var clean func(*html.Node)
 	clean = func(n *html.Node) {
 		for c := n.FirstChild; c != nil; {
 			next := c.NextSibling
 			
-			shouldRemove := false
-			if c.Type == html.CommentNode {
-				shouldRemove = true
-			} else if c.Type == html.ElementNode && strings.ToLower(c.Data) == "xml" {
-				shouldRemove = true
-			}
-
-			if shouldRemove {
+			if c.Type == html.CommentNode && strings.Contains(c.Data, "[if gte mso 9]") {
 				n.RemoveChild(c)
 			} else {
 				clean(c)
