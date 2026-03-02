@@ -302,7 +302,7 @@ func processMessage(srv *gmail.Service, msg *gmail.Message) {
 	}
 
 	// Extract body and collect CIDs
-	item.Body = extractBody(msg.Payload)
+	item.Body = extractBody(srv, msg.Id, msg.Payload)
 	collectCids(srv, msg.Id, msg.Payload, item.CidMap)
 
 	// Replace CIDs in body with data URIs
@@ -359,12 +359,23 @@ func parseFrom(from string) (name, email string) {
 	return name, email
 }
 
-func extractBody(part *gmail.MessagePart) string {
-	// If this is a leaf node with data, return it
+func extractBody(srv *gmail.Service, msgID string, part *gmail.MessagePart) string {
+	// 1. Check if this part has data (either inline or as an attachment)
+	var rawData string
 	if part.Body.Data != "" {
-		data, err := base64.RawURLEncoding.DecodeString(part.Body.Data)
+		rawData = part.Body.Data
+	} else if part.Body.AttachmentId != "" {
+		// Large newsletters are often stored as attachments
+		attach, err := srv.Users.Messages.Attachments.Get("me", msgID, part.Body.AttachmentId).Do()
+		if err == nil {
+			rawData = attach.Data
+		}
+	}
+
+	if rawData != "" {
+		data, err := base64.RawURLEncoding.DecodeString(rawData)
 		if err != nil {
-			data, err = base64.URLEncoding.DecodeString(part.Body.Data)
+			data, err = base64.URLEncoding.DecodeString(rawData)
 		}
 		
 		if err == nil {
@@ -382,16 +393,20 @@ func extractBody(part *gmail.MessagePart) string {
 		}
 	}
 
-	// If it's a multipart, prioritize HTML
-	if strings.HasPrefix(part.MimeType, "multipart/") {
+	// 2. If it's a multipart, prioritize HTML
+	if strings.HasPrefix(strings.ToLower(part.MimeType), "multipart/") {
 		var htmlBody, plainBody string
 		for _, subPart := range part.Parts {
-			body := extractBody(subPart)
-			if subPart.MimeType == "text/html" {
-				htmlBody = body
-			} else if subPart.MimeType == "text/plain" && plainBody == "" {
-				plainBody = body
-			} else if strings.HasPrefix(subPart.MimeType, "multipart/") && body != "" {
+			body := extractBody(srv, msgID, subPart)
+			if strings.EqualFold(subPart.MimeType, "text/html") {
+				if body != "" {
+					htmlBody = body
+				}
+			} else if strings.EqualFold(subPart.MimeType, "text/plain") {
+				if body != "" && plainBody == "" {
+					plainBody = body
+				}
+			} else if strings.HasPrefix(strings.ToLower(subPart.MimeType), "multipart/") && body != "" {
 				if htmlBody == "" {
 					htmlBody = body
 				}
