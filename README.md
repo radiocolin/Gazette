@@ -37,7 +37,7 @@ gmail:
   label: "Newsletters"                          # Optional: Filter by a specific Gmail label
   polling_interval: 300                         # 5 minutes
   token_file: "/app/data/token.json"
-```
+
 server:
   port: 8080
   user: "admin"                       # For GReader ClientLogin
