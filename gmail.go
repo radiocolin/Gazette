@@ -328,7 +328,9 @@ func processMessage(srv *gmail.Service, msg *gmail.Message) {
 	}
 
 	// Extract body - decoding only, no further processing
-	item.Body = extractBody(srv, msg.Id, msg.Payload)
+	body := extractBody(srv, msg.Id, msg.Payload)
+	// Surgically strip only this specific tag
+	item.Body = strings.ReplaceAll(body, "<o:PixelsPerInch>96</o:PixelsPerInch>", "")
 }
 
 func parseFrom(from string) (name, email string) {
