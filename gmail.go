@@ -344,35 +344,41 @@ func processMessage(srv *gmail.Service, msg *gmail.Message) {
 }
 
 func cleanNewsletterHTML(rawHTML string) string {
-	// 1. Aggressively strip MSO conditional blocks using regex before parsing.
-	msoRegex := regexp.MustCompile(`(?is)(<!--\s*\[if\s+[^\]]+\]>.*?<!\[endif\]\s*-->|<!\[if\s+[^\]]+\]>.*?<!\[endif\]>)`)
-	rawHTML = msoRegex.ReplaceAllString(rawHTML, "")
-
 	doc, err := html.Parse(strings.NewReader(rawHTML))
 	if err != nil {
 		return rawHTML
 	}
 
-	// 2. Traversal to remove any remaining script, xml, or meta tags
-	// and to rewrite image sources to go through our proxy
+	// Traversal to remove nonsense tags and MSO conditional comments
 	var clean func(*html.Node)
 	clean = func(n *html.Node) {
 		for c := n.FirstChild; c != nil; {
 			next := c.NextSibling
 			
-			if c.Type == html.ElementNode {
-				if c.Data == "script" || c.Data == "xml" || c.Data == "meta" {
+			if c.Type == html.CommentNode {
+				// Remove MSO conditional comments which often contain XML nonsense that leaks
+				lowerData := strings.ToLower(c.Data)
+				// We specifically want to remove [if gte mso ...] and similar, 
+				// but be careful not to strip [if !mso] which contains the real content.
+				if (strings.Contains(lowerData, "mso") && !strings.Contains(lowerData, "!mso")) || 
+				   strings.Contains(lowerData, "officedocumentsettings") {
 					n.RemoveChild(c)
-				} else if c.Data == "img" {
-					for i, attr := range c.Attr {
-						if attr.Key == "src" && strings.HasPrefix(attr.Val, "http") {
-							proxied := fmt.Sprintf("/proxy?u=%s", url.QueryEscape(attr.Val))
-							c.Attr[i].Val = proxied
-							log.Printf("REWRITING IMAGE: %s -> %s", attr.Val, proxied)
-						} else if attr.Key == "srcset" {
-							c.Attr[i].Val = ""
+				}
+			} else if c.Type == html.ElementNode {
+				tagName := strings.ToLower(c.Data)
+				// Remove specific nonsense tags that leak text or break layout
+				if tagName == "script" || tagName == "xml" || tagName == "meta" || tagName == "link" || 
+				   strings.Contains(tagName, "officedocumentsettings") || strings.Contains(tagName, "pixelsperinch") {
+					n.RemoveChild(c)
+				} else if tagName == "img" {
+					// Clean up images - ensure they have a source and remove srcset which can confuse some readers
+					var newAttrs []html.Attribute
+					for _, attr := range c.Attr {
+						if strings.ToLower(attr.Key) != "srcset" {
+							newAttrs = append(newAttrs, attr)
 						}
 					}
+					c.Attr = newAttrs
 					clean(c)
 				} else {
 					clean(c)
@@ -461,6 +467,8 @@ func extractBody(srv *gmail.Service, msgID string, part *gmail.MessagePart) stri
 		
 		if err == nil {
 			content := string(data)
+			// Gmail API returns the raw bytes of the part. If the original email was
+			// quoted-printable, these bytes still contain QP encoding.
 			for _, h := range part.Headers {
 				if strings.EqualFold(h.Name, "Content-Transfer-Encoding") && strings.EqualFold(h.Value, "quoted-printable") {
 					decoded, err := io.ReadAll(quotedprintable.NewReader(bytes.NewReader(data)))
