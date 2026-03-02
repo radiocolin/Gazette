@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/mail"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -342,18 +343,27 @@ func processMessage(srv *gmail.Service, msg *gmail.Message) {
 }
 
 func cleanNewsletterHTML(rawHTML string) string {
+	// 1. Aggressively strip MSO conditional blocks using regex before parsing.
+	// This covers both comment-wrapped <!--[if mso]> and downlevel-revealed <![if !mso]>
+	msoRegex := regexp.MustCompile(`(?is)(<!--\s*\[if\s+[^\]]+\]>.*?<!\[endif\]\s*-->|<!\[if\s+[^\]]+\]>.*?<!\[endif\]>)`)
+	rawHTML = msoRegex.ReplaceAllString(rawHTML, "")
+
 	doc, err := html.Parse(strings.NewReader(rawHTML))
 	if err != nil {
 		return rawHTML
 	}
 
-	// Traversal to remove specific MSO comment blocks
+	// 2. Traversal to remove any remaining style, script, or xml tags
 	var clean func(*html.Node)
 	clean = func(n *html.Node) {
 		for c := n.FirstChild; c != nil; {
 			next := c.NextSibling
+			if n.Type == html.ElementNode && (n.Data == "style" || n.Data == "script" || n.Data == "xml" || n.Data == "meta") {
+				// This node itself should be removed, but we are inside the child loop.
+				// The parent will handle it.
+			}
 			
-			if c.Type == html.CommentNode && strings.Contains(c.Data, "[if gte mso 9]") {
+			if c.Type == html.ElementNode && (c.Data == "style" || c.Data == "script" || c.Data == "xml" || c.Data == "meta") {
 				n.RemoveChild(c)
 			} else {
 				clean(c)
