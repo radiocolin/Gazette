@@ -50,7 +50,7 @@ server:
 docker-compose up -d
 ```
 
-Once running, visit `http://localhost:8282` to authorize the app with your Gmail account.
+Once running, visit your configured `public_url` (e.g., `https://gazette.yourdomain.com`) to authorize the app with your Gmail account.
 
 ## 📖 How it Works
 
@@ -58,7 +58,7 @@ Once running, visit `http://localhost:8282` to authorize the app with your Gmail
 Individual feeds are available at `/feed?id=sender@example.com`.
 
 ### Google Reader API
-Gazette implements a subset of the GReader API, making it a "source" for modern RSS clients. Point your reader's GReader/FreshRSS account to `http://your-server/api/greader.php/` and use the credentials defined in your `config.yaml`.
+Gazette implements a subset of the GReader API, making it a "source" for modern RSS clients. Point your reader's GReader/FreshRSS account to `https://gazette.yourdomain.com/api/greader.php/` and use the credentials defined in your `config.yaml`.
 
 ### Content Cleaning
 Gazette doesn't just pass through the email HTML. It:
