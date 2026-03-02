@@ -54,11 +54,16 @@ type RSSChannel struct {
 }
 
 type RSSItem struct {
-	Title       string `xml:"title"`
-	Link        string `xml:"link"`
-	Description string `xml:"description"`
-	PubDate     string `xml:"pubDate"`
-	GUID        string `xml:"guid"`
+	Title       string   `xml:"title"`
+	Link        string   `xml:"link"`
+	Description string   `xml:"description"`
+	PubDate     string   `xml:"pubDate"`
+	GUID        *RSSGUID `xml:"guid"`
+}
+
+type RSSGUID struct {
+	Value       string `xml:",chardata"`
+	IsPermaLink bool   `xml:"isPermaLink,attr"`
 }
 
 func handleFeed(w http.ResponseWriter, r *http.Request) {
@@ -105,7 +110,10 @@ func handleFeed(w http.ResponseWriter, r *http.Request) {
 			Link:        viewURL,
 			Description: item.Body,
 			PubDate:     item.Timestamp.Format(time.RFC1123Z),
-			GUID:        item.HexID,
+			GUID: &RSSGUID{
+				Value:       item.HexID,
+				IsPermaLink: false,
+			},
 		})
 	}
 
