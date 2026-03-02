@@ -16,6 +16,7 @@ import (
 func registerGReaderHandlers(mux *http.ServeMux) {
 	// Standard paths
 	mux.HandleFunc("/view", handleView)
+	mux.HandleFunc("/feed", handleFeed)
 	mux.HandleFunc("/accounts/ClientLogin", handleLogin)
 	mux.HandleFunc("/reader/api/0/token", handleToken)
 	mux.HandleFunc("/reader/api/0/tag/list", handleTagList)
@@ -27,6 +28,7 @@ func registerGReaderHandlers(mux *http.ServeMux) {
 
 	// FreshRSS specific paths
 	mux.HandleFunc("/api/greader.php/view", handleView)
+	mux.HandleFunc("/api/greader.php/feed", handleFeed)
 	mux.HandleFunc("/api/greader.php/accounts/ClientLogin", handleLogin)
 	mux.HandleFunc("/api/greader.php/reader/api/0/token", handleToken)
 	mux.HandleFunc("/api/greader.php/reader/api/0/tag/list", handleTagList)
@@ -35,6 +37,55 @@ func registerGReaderHandlers(mux *http.ServeMux) {
 	mux.HandleFunc("/api/greader.php/reader/api/0/stream/items/ids", handleItemIDs)
 	mux.HandleFunc("/api/greader.php/reader/api/0/stream/items/contents", handleItemContents)
 	mux.HandleFunc("/api/greader.php/reader/api/0/edit-tag", handleEditTag)
+}
+
+func handleFeed(w http.ResponseWriter, r *http.Request) {
+	id := r.URL.Query().Get("id") // feed/email@example.com
+	if id == "" {
+		http.Error(w, "Missing ID", http.StatusBadRequest)
+		return
+	}
+
+	email := strings.TrimPrefix(id, "feed/")
+
+	cache.mu.RLock()
+	var items []*Item
+	sub := cache.Subscriptions[email]
+	for _, item := range cache.Items {
+		if item.Sender == email {
+			items = append(items, item)
+		}
+	}
+	cache.mu.RUnlock()
+
+	if sub == nil {
+		http.Error(w, "Feed not found", http.StatusNotFound)
+		return
+	}
+
+	sort.Slice(items, func(i, j int) bool {
+		return items[i].Timestamp.After(items[j].Timestamp)
+	})
+
+	w.Header().Set("Content-Type", "application/rss+xml; charset=utf-8")
+	fmt.Fprintf(w, "<?xml version=\"1.0\" encoding=\"UTF-8\" ?>\n")
+	fmt.Fprintf(w, "<rss version=\"2.0\">\n<channel>\n")
+	fmt.Fprintf(w, "  <title>%s</title>\n", sub.Title)
+	fmt.Fprintf(w, "  <link>%s</link>\n", strings.TrimSuffix(config.Gmail.PublicURL, "/"))
+	fmt.Fprintf(w, "  <description>Newsletters from %s</description>\n", sub.Title)
+
+	for _, item := range items {
+		viewURL := fmt.Sprintf("%s/view?id=%s", strings.TrimSuffix(config.Gmail.PublicURL, "/"), item.HexID)
+		fmt.Fprintf(w, "  <item>\n")
+		fmt.Fprintf(w, "    <title>%s</title>\n", item.Subject)
+		fmt.Fprintf(w, "    <link>%s</link>\n", viewURL)
+		fmt.Fprintf(w, "    <description><![CDATA[%s]]></description>\n", item.Body)
+		fmt.Fprintf(w, "    <pubDate>%s</pubDate>\n", item.Timestamp.Format(time.RFC1123Z))
+		fmt.Fprintf(w, "    <guid>%s</guid>\n", item.HexID)
+		fmt.Fprintf(w, "  </item>\n")
+	}
+
+	fmt.Fprintf(w, "</channel>\n</rss>")
 }
 
 func handleView(w http.ResponseWriter, r *http.Request) {
@@ -201,15 +252,21 @@ func handleSubscriptionList(w http.ResponseWriter, r *http.Request) {
 		if cache.ExcludedSenders[email] {
 			continue
 		}
+
+		domain := email
+		if parts := strings.Split(email, "@"); len(parts) == 2 {
+			domain = parts[1]
+		}
+
 		subs = append(subs, GSub{
 			ID:    s.ID,
 			Title: s.Title,
 			Categories: []map[string]string{
 				{"id": "user/-/label/Newsletters", "label": "Newsletters"},
 			},
-			URL:     "https://" + email,
-			HtmlURL: "https://" + email,
-			IconURL: "https://www.google.com/s2/favicons?domain=" + email,
+			URL:     fmt.Sprintf("%s/feed?id=%s", strings.TrimSuffix(config.Gmail.PublicURL, "/"), s.ID),
+			HtmlURL: "https://" + domain,
+			IconURL: "https://www.google.com/s2/favicons?domain=" + domain,
 		})
 	}
 
