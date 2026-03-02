@@ -169,6 +169,8 @@ func fetchMessages(ctx context.Context, srv *gmail.Service) {
 	pageToken := ""
 	pageNum := 1
 	newItems := false
+	processedCount := 0
+	const maxToProcess = 500
 
 	for {
 		r, err := withRetry(func() (*gmail.ListMessagesResponse, error) {
@@ -200,8 +202,13 @@ func fetchMessages(ctx context.Context, srv *gmail.Service) {
 					item, exists := cache.Items[m.Id]
 					cache.mu.RUnlock()
 
-					// 1. Check for read status updates if fully processed
+					// 1. Check for read status updates if fully processed.
+					// Optimization: If it's already read in cache, don't waste API quota checking it again.
 					if exists && item.Sender != "" && item.Body != "" {
+						if item.IsRead {
+							continue
+						}
+
 						msgMetadata, err := withRetry(func() (*gmail.Message, error) {
 							return srv.Users.Messages.Get("me", m.Id).Format("metadata").Do()
 						})
@@ -285,6 +292,12 @@ func fetchMessages(ctx context.Context, srv *gmail.Service) {
 		}
 		close(jobs)
 		wg.Wait()
+
+		processedCount += len(r.Messages)
+		if processedCount >= maxToProcess {
+			log.Printf("Reached limit of %d messages. Stopping poll.", maxToProcess)
+			break
+		}
 
 		pageToken = r.NextPageToken
 		if pageToken == "" {
