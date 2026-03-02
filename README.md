@@ -18,7 +18,8 @@ Gazette is a lightweight Gmail-to-RSS bridge designed specifically for reading n
 2.  Create a new project and enable the **Gmail API**.
 3.  Configure the **OAuth Consent Screen** (Internal or External).
 4.  Create **OAuth 2.0 Client IDs** (Web application).
-    -   Add `http://localhost:8282/auth/callback` (or your public URL) to the **Authorized redirect URIs**.
+    -   Add `https://your-public-domain.com/auth/callback` to the **Authorized redirect URIs**.
+    -   *Note: Google Console typically requires a publicly resolvable top-level domain (TLD) for Web Application redirect URIs. Raw IP addresses or localhost may be restricted or require HTTPS.*
 5.  Download your Client ID and Client Secret.
 
 ### 2. Configuration
