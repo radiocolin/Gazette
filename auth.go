@@ -38,10 +38,9 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 				<p>Add a new <b>FreshRSS</b> account with these details:</p>
 				<ul>
 					<li><b>Server:</b> %s</li>
-					<li><b>Username:</b> %s</li>
 					<li><b>Password:</b> (configured in config.yaml)</li>
 				</ul>
-			</body></html>`, config.Gmail.Label, config.Gmail.PublicURL, config.Server.User)
+			</body></html>`, config.Gmail.Label, config.Gmail.PublicURL)
 		return
 	}
 
