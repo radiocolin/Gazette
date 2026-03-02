@@ -3,7 +3,7 @@ services:
     build: .
     image: gazette:latest
     ports:
-      - "8080:8080"
+      - "8282:8080"
     volumes:
       - ./data:/app/data
       - ./config.yaml:/app/config.yaml
