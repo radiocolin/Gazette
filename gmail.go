@@ -309,6 +309,13 @@ func incrementalSync(svc *gmail.Service) bool {
 					continue
 				}
 				processMessage(svc, fullMsg)
+				// New messages via history always surface as unread.
+				// Newsletter filters often use "Skip Inbox" which doesn't set UNREAD.
+				cache.mu.Lock()
+				if it, ok := cache.Items[msgID]; ok {
+					it.IsRead = false
+				}
+				cache.mu.Unlock()
 				newItems = true
 			}
 
@@ -561,11 +568,7 @@ func syncReadStatus(svc *gmail.Service) {
 			continue
 		}
 		inUnreadSet := unreadIDs[item.ID]
-		if !item.IsRead && !inUnreadSet {
-			log.Printf("READ [full sync]: Marking read: %s (%s - %s)", item.ID, item.Sender, item.Subject)
-			item.IsRead = true
-			changed = true
-		} else if item.IsRead && inUnreadSet {
+		if item.IsRead && inUnreadSet {
 			log.Printf("READ [full sync]: Marking unread: %s (%s - %s)", item.ID, item.Sender, item.Subject)
 			item.IsRead = false
 			changed = true
