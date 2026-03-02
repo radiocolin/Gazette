@@ -17,7 +17,6 @@ import (
 	"sync"
 	"time"
 
-	"golang.org/x/net/html"
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
 	"google.golang.org/api/gmail/v1"
@@ -153,48 +152,47 @@ func pollGmail(ctx context.Context) {
 	}
 }
 
+type job struct {
+	index int
+	msg   *gmail.Message
+}
+
 func fetchMessages(ctx context.Context, srv *gmail.Service) {
-	query := fmt.Sprintf("label:%s", config.Gmail.Label)
+	gmailMu.Lock()
+	defer gmailMu.Unlock()
+
+	log.Printf("Fetching messages...")
+
+	query := ""
+	if config.Gmail.Label != "" {
+		query = fmt.Sprintf("label:%s", config.Gmail.Label)
+	}
+
+	pageToken := ""
+	pageNum := 1
 	newItems := false
 
-	pageNum := 1
-	pageToken := ""
 	for {
-		log.Printf("Fetching page %d of emails...", pageNum)
-		
 		r, err := withRetry(func() (*gmail.ListMessagesResponse, error) {
-			call := srv.Users.Messages.List("me").Q(query).MaxResults(500)
-			if pageToken != "" {
-				call.PageToken(pageToken)
-			}
-			return call.Do()
+			return srv.Users.Messages.List("me").Q(query).PageToken(pageToken).Do()
 		})
-		
 		if err != nil {
-			log.Printf("Unable to retrieve messages: %v", err)
+			log.Printf("Error listing messages: %v", err)
 			return
 		}
 
 		if len(r.Messages) == 0 {
+			log.Printf("No messages found.")
 			break
 		}
 
-		// Process messages in this page concurrently
-		type job struct {
-			index int
-			msg   *gmail.Message
-		}
-		
+		log.Printf("Page %d: Found %d messages", pageNum, len(r.Messages))
+
 		jobs := make(chan job, len(r.Messages))
 		var wg sync.WaitGroup
-		workerCount := 10
-		if len(r.Messages) < workerCount {
-			workerCount = len(r.Messages)
-		}
 
-		log.Printf("Processing %d messages on page %d using %d workers...", len(r.Messages), pageNum, workerCount)
-
-		for w := 0; w < workerCount; w++ {
+		numWorkers := 10
+		for w := 0; w < numWorkers; w++ {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
@@ -329,94 +327,8 @@ func processMessage(srv *gmail.Service, msg *gmail.Message) {
 		}
 	}
 
-	// Extract body and collect CIDs
+	// Extract body - decoding only, no further processing
 	item.Body = extractBody(srv, msg.Id, msg.Payload)
-	collectCids(srv, msg.Id, msg.Payload, item.CidMap)
-
-	// Replace CIDs in body with data URIs
-	for cid, dataURI := range item.CidMap {
-		item.Body = strings.ReplaceAll(item.Body, "cid:"+cid, dataURI)
-	}
-
-	item.Body = cleanNewsletterHTML(item.Body)
-}
-
-func cleanNewsletterHTML(rawHTML string) string {
-	doc, err := html.Parse(strings.NewReader(rawHTML))
-	if err != nil {
-		return rawHTML
-	}
-
-	// Traversal to remove nonsense tags and MSO conditional comments
-	var clean func(*html.Node)
-	clean = func(n *html.Node) {
-		for c := n.FirstChild; c != nil; {
-			next := c.NextSibling
-			
-			if c.Type == html.CommentNode {
-				// Remove MSO conditional comments which often contain XML nonsense that leaks
-				lowerData := strings.ToLower(c.Data)
-				// We specifically want to remove [if gte mso ...] and similar, 
-				// but be careful not to strip [if !mso] which contains the real content.
-				if (strings.Contains(lowerData, "mso") && !strings.Contains(lowerData, "!mso")) || 
-				   strings.Contains(lowerData, "officedocumentsettings") {
-					n.RemoveChild(c)
-				}
-			} else if c.Type == html.ElementNode {
-				tagName := strings.ToLower(c.Data)
-				// Remove specific nonsense tags that leak text or break layout
-				if tagName == "script" || tagName == "xml" || tagName == "meta" || tagName == "link" || 
-				   strings.Contains(tagName, "officedocumentsettings") || strings.Contains(tagName, "pixelsperinch") {
-					n.RemoveChild(c)
-				} else if tagName == "img" {
-					// Clean up images - ensure they have a source and remove srcset which can confuse some readers
-					var newAttrs []html.Attribute
-					for _, attr := range c.Attr {
-						if strings.ToLower(attr.Key) != "srcset" {
-							newAttrs = append(newAttrs, attr)
-						}
-					}
-					c.Attr = newAttrs
-					clean(c)
-				} else {
-					clean(c)
-				}
-			} else {
-				clean(c)
-			}
-			c = next
-		}
-	}
-	clean(doc)
-
-	var buf bytes.Buffer
-	if err := html.Render(&buf, doc); err != nil {
-		return rawHTML
-	}
-	return buf.String()
-}
-
-func collectCids(srv *gmail.Service, msgID string, part *gmail.MessagePart, cidMap map[string]string) {
-	if part.Body.AttachmentId != "" {
-		cid := ""
-		for _, h := range part.Headers {
-			if strings.EqualFold(h.Name, "Content-ID") {
-				cid = strings.Trim(h.Value, "<>")
-				break
-			}
-		}
-		if cid != "" {
-			attach, err := srv.Users.Messages.Attachments.Get("me", msgID, part.Body.AttachmentId).Do()
-			if err == nil {
-				dataURI := fmt.Sprintf("data:%s;base64,%s", part.MimeType, attach.Data)
-				cidMap[cid] = dataURI
-			}
-		}
-	}
-
-	for _, subPart := range part.Parts {
-		collectCids(srv, msgID, subPart, cidMap)
-	}
 }
 
 func parseFrom(from string) (name, email string) {
