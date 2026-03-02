@@ -162,7 +162,7 @@ func fetchMessages(ctx context.Context, srv *gmail.Service) {
 		log.Printf("Fetching page %d of emails...", pageNum)
 		
 		r, err := withRetry(func() (*gmail.ListMessagesResponse, error) {
-			call := srv.Users.Messages.List("me").Q(query).MaxResults(100)
+			call := srv.Users.Messages.List("me").Q(query).MaxResults(500)
 			if pageToken != "" {
 				call.PageToken(pageToken)
 			}
@@ -174,93 +174,120 @@ func fetchMessages(ctx context.Context, srv *gmail.Service) {
 			return
 		}
 
-		for i, m := range r.Messages {
-			log.Printf("[%d/%d] Checking message %s", i+1, len(r.Messages), m.Id)
-			cache.mu.RLock()
-			item, exists := cache.Items[m.Id]
-			cache.mu.RUnlock()
+		if len(r.Messages) == 0 {
+			break
+		}
 
-			// 1. If it already exists and is fully processed, just check for read status updates
-			if exists && item.Sender != "" && item.Body != "" {
-				msgMetadata, err := withRetry(func() (*gmail.Message, error) {
-					return srv.Users.Messages.Get("me", m.Id).Format("metadata").Do()
-				})
-				if err == nil {
-					isUnread := false
-					for _, lbl := range msgMetadata.LabelIds {
-						if lbl == "UNREAD" {
-							isUnread = true
-							break
+		// Process messages in this page concurrently
+		type job struct {
+			index int
+			msg   *gmail.Message
+		}
+		
+		jobs := make(chan job, len(r.Messages))
+		var wg sync.WaitGroup
+		workerCount := 10
+		if len(r.Messages) < workerCount {
+			workerCount = len(r.Messages)
+		}
+
+		log.Printf("Processing %d messages on page %d using %d workers...", len(r.Messages), pageNum, workerCount)
+
+		for w := 0; w < workerCount; w++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for j := range jobs {
+					m := j.msg
+					cache.mu.RLock()
+					item, exists := cache.Items[m.Id]
+					cache.mu.RUnlock()
+
+					// 1. Check for read status updates if fully processed
+					if exists && item.Sender != "" && item.Body != "" {
+						msgMetadata, err := withRetry(func() (*gmail.Message, error) {
+							return srv.Users.Messages.Get("me", m.Id).Format("metadata").Do()
+						})
+						if err == nil {
+							isUnread := false
+							for _, lbl := range msgMetadata.LabelIds {
+								if lbl == "UNREAD" {
+									isUnread = true
+									break
+								}
+							}
+							cache.mu.Lock()
+							item.IsRead = !isUnread
+							cache.mu.Unlock()
+						}
+						continue
+					}
+
+					// 2. Fetch metadata to check sender
+					metadata, err := withRetry(func() (*gmail.Message, error) {
+						return srv.Users.Messages.Get("me", m.Id).Format("metadata").MetadataHeaders("From", "Subject").Do()
+					})
+					if err != nil {
+						continue
+					}
+
+					from := ""
+					subject := ""
+					for _, h := range metadata.Payload.Headers {
+						if h.Name == "From" {
+							from = h.Value
+						} else if h.Name == "Subject" {
+							subject = h.Value
 						}
 					}
-					cache.mu.Lock()
-					item.IsRead = !isUnread
-					cache.mu.Unlock()
+					_, email := parseFrom(from)
+
+					// 3. Filters
+					if userEmail != "" && strings.EqualFold(email, userEmail) {
+						if !exists {
+							cache.GetOrCreateItem(m.Id)
+						}
+						continue
+					}
+
+					lowerSub := strings.ToLower(subject)
+					if strings.HasPrefix(lowerSub, "re:") || strings.HasPrefix(lowerSub, "fwd:") {
+						if !exists {
+							cache.GetOrCreateItem(m.Id)
+						}
+						continue
+					}
+
+					cache.mu.RLock()
+					excluded := cache.ExcludedSenders[email]
+					cache.mu.RUnlock()
+					if excluded {
+						if !exists {
+							cache.GetOrCreateItem(m.Id)
+						}
+						continue
+					}
+
+					// 4. Fetch full content
+					fullMsg, err := withRetry(func() (*gmail.Message, error) {
+						return srv.Users.Messages.Get("me", m.Id).Format("full").Do()
+					})
+					if err != nil {
+						continue
+					}
+
+					log.Printf("[%d/%d] PROCESSED: %s", j.index+1, len(r.Messages), subject)
+					processMessage(srv, fullMsg)
+					newItems = true
 				}
-				continue
-			}
-
-			// 2. Fetch metadata to check sender and if it's a valid newsletter
-			metadata, err := withRetry(func() (*gmail.Message, error) {
-				return srv.Users.Messages.Get("me", m.Id).Format("metadata").MetadataHeaders("From", "Subject").Do()
-			})
-			if err != nil {
-				log.Printf("Unable to retrieve message metadata %v: %v", m.Id, err)
-				continue
-			}
-
-			from := ""
-			subject := ""
-			for _, h := range metadata.Payload.Headers {
-				if h.Name == "From" {
-					from = h.Value
-				} else if h.Name == "Subject" {
-					subject = h.Value
-				}
-			}
-			_, email := parseFrom(from)
-
-			// 3. SKIP if the sender is the user themselves (Filter replies/forwards)
-			if userEmail != "" && strings.EqualFold(email, userEmail) {
-				if !exists {
-					cache.GetOrCreateItem(m.Id)
-				}
-				continue
-			}
-
-			// 4. SKIP if it's clearly a human reply or forward (Subject starts with Re: or Fwd:)
-			lowerSub := strings.ToLower(subject)
-			if strings.HasPrefix(lowerSub, "re:") || strings.HasPrefix(lowerSub, "fwd:") {
-				if !exists {
-					cache.GetOrCreateItem(m.Id)
-				}
-				continue
-			}
-
-			// 5. Check if sender is excluded
-			cache.mu.RLock()
-			excluded := cache.ExcludedSenders[email]
-			cache.mu.RUnlock()
-			if excluded {
-				if !exists {
-					cache.GetOrCreateItem(m.Id)
-				}
-				continue
-			}
-
-			// 6. Process the message
-			fullMsg, err := withRetry(func() (*gmail.Message, error) {
-				return srv.Users.Messages.Get("me", m.Id).Format("full").Do()
-			})
-			if err != nil {
-				log.Printf("Unable to retrieve message %v: %v", m.Id, err)
-				continue
-			}
-
-			log.Printf("PROCESSING NEWSLETTER: From='%s' Subject='%s' Msg=%s", from, fullMsg.Snippet, m.Id)
-			processMessage(srv, fullMsg)
-			newItems = true
+			}()
 		}
+
+		for i, m := range r.Messages {
+			jobs <- job{index: i, msg: m}
+		}
+		close(jobs)
+		wg.Wait()
 
 		pageToken = r.NextPageToken
 		if pageToken == "" {
