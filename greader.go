@@ -219,7 +219,7 @@ func handleEditTag(w http.ResponseWriter, r *http.Request) {
 				cleanID = parts[len(parts)-1]
 			}
 
-			if intID, err := strconv.ParseUint(cleanID, 10, 64); err == nil {
+			if intID, err := strconv.ParseUint(cleanID, 16, 64); err == nil {
 				if item := cache.GetItemByInt(intID); item != nil && !item.IsRead {
 					gmailIDs = append(gmailIDs, item.ID)
 					items = append(items, item)
@@ -265,7 +265,7 @@ func handleEditTag(w http.ResponseWriter, r *http.Request) {
 				cleanID = parts[len(parts)-1]
 			}
 
-			if intID, err := strconv.ParseUint(cleanID, 10, 64); err == nil {
+			if intID, err := strconv.ParseUint(cleanID, 16, 64); err == nil {
 				if item := cache.GetItemByInt(intID); item != nil && item.IsRead {
 					gmailIDs = append(gmailIDs, item.ID)
 					items = append(items, item)
@@ -470,9 +470,10 @@ func handleItemContents(w http.ResponseWriter, r *http.Request) {
 			cleanID = parts[len(parts)-1]
 		}
 
-		// Try to lookup by decimal
+		// IDs arrive as hex — NNW converts decimal IDs from stream/items/ids to hex
+		// before requesting contents (per GReader protocol).
 		var item *Item
-		if intID, err := strconv.ParseUint(cleanID, 10, 64); err == nil {
+		if intID, err := strconv.ParseUint(cleanID, 16, 64); err == nil {
 			item = cache.GetItemByInt(intID)
 		}
 
@@ -487,7 +488,7 @@ func handleItemContents(w http.ResponseWriter, r *http.Request) {
 			body = item.Body
 		}
 		entry := GEntry{
-			ID:            "tag:google.com,2005:reader/item/" + fmt.Sprintf("%d", item.IntID),
+			ID:            fmt.Sprintf("tag:google.com,2005:reader/item/%016x", item.IntID),
 			Title:         item.Subject,
 			Published:     float64(item.Timestamp.Unix()),
 			CrawlTimeMsec: msec,
