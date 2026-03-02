@@ -12,7 +12,6 @@ import (
 	"net/http"
 	"net/mail"
 	"os"
-	"regexp"
 	"strconv"
 	"strings"
 	"sync"
