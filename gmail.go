@@ -347,20 +347,34 @@ func cleanNewsletterHTML(rawHTML string) string {
 		return rawHTML
 	}
 
-	// Traversal to remove all comment nodes
-	var removeComments func(*html.Node)
-	removeComments = func(n *html.Node) {
+	// Traversal to remove problematic nodes
+	var clean func(*html.Node)
+	clean = func(n *html.Node) {
 		for c := n.FirstChild; c != nil; {
 			next := c.NextSibling
+			
+			// Remove comments and specific meta/data tags that confuse preview generators
+			shouldRemove := false
 			if c.Type == html.CommentNode {
+				shouldRemove = true
+			} else if c.Type == html.ElementNode {
+				tag := strings.ToLower(c.Data)
+				if tag == "xml" || tag == "script" || tag == "style" || tag == "meta" || tag == "link" {
+					// We strip <style> too because we've already decoded the body
+					// and most RSS readers generate better snippets without it in the head.
+					shouldRemove = true
+				}
+			}
+
+			if shouldRemove {
 				n.RemoveChild(c)
 			} else {
-				removeComments(c)
+				clean(c)
 			}
 			c = next
 		}
 	}
-	removeComments(doc)
+	clean(doc)
 
 	var buf bytes.Buffer
 	if err := html.Render(&buf, doc); err != nil {
