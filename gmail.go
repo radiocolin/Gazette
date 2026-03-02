@@ -336,6 +336,26 @@ func processMessage(srv *gmail.Service, msg *gmail.Message) {
 	for cid, dataURI := range item.CidMap {
 		item.Body = strings.ReplaceAll(item.Body, "cid:"+cid, dataURI)
 	}
+
+	item.Body = cleanNewsletterHTML(item.Body)
+}
+
+func cleanNewsletterHTML(html string) string {
+	// Remove Microsoft Office conditional comments like <!--[if gte mso 9]>...<![endif]-->
+	// These often contain <o:PixelsPerInch>96</o:PixelsPerInch> which confuses preview generators.
+	for {
+		start := strings.Index(html, "<!--[if")
+		if start == -1 {
+			break
+		}
+		relativeEnd := strings.Index(html[start:], "![endif]-->")
+		if relativeEnd == -1 {
+			break
+		}
+		end := start + relativeEnd + 11
+		html = html[:start] + html[end:]
+	}
+	return html
 }
 
 func collectCids(srv *gmail.Service, msgID string, part *gmail.MessagePart, cidMap map[string]string) {
