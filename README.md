@@ -15,14 +15,13 @@ Gazette is a lightweight Gmail-to-RSS bridge designed specifically for reading n
 ### 0. Prerequisites
 - A publicly resolvable domain (e.g., `gazette.yourdomain.com`).
 - An SSL certificate (Gazette is intended to run behind a reverse proxy like Nginx, Caddy, or Traefik that handles HTTPS). **Google OAuth will not work without a public HTTPS endpoint.**
-
 ### 1. Gmail API Setup
 
 1.  Go to the [Google Cloud Console](https://console.cloud.google.com/).
 2.  Create a new project and enable the **Gmail API**.
 3.  Configure the **OAuth Consent Screen** (Internal or External).
 4.  Create **OAuth 2.0 Client IDs** (Web application).
-    -   Add `https://your-public-domain.com/auth/callback` to the **Authorized redirect URIs**.
+    -   Add `https://gazette.yourdomain.com/auth/callback` to the **Authorized redirect URIs**.
 5.  Download your Client ID and Client Secret.
 
 ### 2. Configuration
@@ -37,6 +36,7 @@ gmail:
   label: "Newsletters"                          # Optional: Filter by a specific Gmail label
   polling_interval: 300                         # 5 minutes
   token_file: "/app/data/token.json"
+```
 
 server:
   port: 8080
@@ -55,7 +55,7 @@ Once running, visit your configured `public_url` (e.g., `https://gazette.yourdom
 ## 📖 How it Works
 
 ### RSS Feed
-Individual feeds are available at `/feed?id=sender@example.com`.
+Individual feeds are available at `https://gazette.yourdomain.com/feed?id=sender@example.com`.
 
 ### Google Reader API
 Gazette implements a subset of the GReader API, making it a "source" for modern RSS clients. Point your reader's GReader/FreshRSS account to `https://gazette.yourdomain.com/api/greader.php/` and use the credentials defined in your `config.yaml`.
