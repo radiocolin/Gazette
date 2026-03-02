@@ -108,7 +108,7 @@ func handleFeed(w http.ResponseWriter, r *http.Request) {
 	}
 
 	for _, item := range items {
-		viewURL := fmt.Sprintf("%s/view?id=%s", strings.TrimSuffix(config.Gmail.PublicURL, "/"), item.HexID)
+		viewURL := fmt.Sprintf("%s/view?id=%d", strings.TrimSuffix(config.Gmail.PublicURL, "/"), item.IntID)
 		body := item.CleanBody
 		if body == "" {
 			body = item.Body
@@ -119,7 +119,7 @@ func handleFeed(w http.ResponseWriter, r *http.Request) {
 			Description: body,
 			PubDate:     item.Timestamp.Format(time.RFC1123Z),
 			GUID: &RSSGUID{
-				Value:       item.HexID,
+				Value:       fmt.Sprintf("%d", item.IntID),
 				IsPermaLink: false,
 			},
 		})
@@ -142,6 +142,12 @@ func handleView(w http.ResponseWriter, r *http.Request) {
 	}
 
 	item := cache.GetItemByHex(id)
+	if item == nil {
+		if intID, err := strconv.ParseUint(id, 10, 64); err == nil {
+			item = cache.GetItemByInt(intID)
+		}
+	}
+
 	if item == nil {
 		http.Error(w, "Item not found", http.StatusNotFound)
 		return
@@ -417,13 +423,13 @@ func handleItemContents(w http.ResponseWriter, r *http.Request) {
 		}
 
 		msec := item.Timestamp.UnixMilli()
-		viewURL := fmt.Sprintf("%s/view?id=%s", strings.TrimSuffix(config.Gmail.PublicURL, "/"), item.HexID)
+		viewURL := fmt.Sprintf("%s/view?id=%d", strings.TrimSuffix(config.Gmail.PublicURL, "/"), item.IntID)
 		body := item.CleanBody
 		if body == "" {
 			body = item.Body
 		}
 		entry := GEntry{
-			ID:            "tag:google.com,2005:reader/item/" + item.HexID,
+			ID:            "tag:google.com,2005:reader/item/" + fmt.Sprintf("%016x", item.IntID), // Keep hex for the reader tag if it expects it, but we standardized on decimal strings elsewhere. Actually, the 'id' in the JSON should match what was requested.
 			Title:         item.Subject,
 			Published:     float64(item.Timestamp.Unix()),
 			CrawlTimeMsec: msec,
