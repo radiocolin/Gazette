@@ -25,6 +25,7 @@ var (
 	gmailSvc   *gmail.Service
 	gmailMu    sync.RWMutex
 	oauthConf  *oauth2.Config
+	userEmail  string
 )
 
 func initGmail(ctx context.Context) {
@@ -64,6 +65,12 @@ func initGmail(ctx context.Context) {
 	if err != nil {
 		log.Printf("Error creating Gmail service: %v", err)
 		return
+	}
+
+	profile, err := srv.Users.GetProfile("me").Do()
+	if err == nil {
+		userEmail = profile.EmailAddress
+		log.Printf("Authenticated as: %s", userEmail)
 	}
 
 	gmailMu.Lock()
@@ -120,8 +127,6 @@ func fetchMessages(ctx context.Context, srv *gmail.Service) {
 	query := fmt.Sprintf("label:%s", config.Gmail.Label)
 	newItems := false
 
-	// 1. Fetch all message summaries for the label
-	var allMessages []*gmail.Message
 	pageToken := ""
 	for {
 		call := srv.Users.Messages.List("me").Q(query).MaxResults(500)
@@ -133,103 +138,92 @@ func fetchMessages(ctx context.Context, srv *gmail.Service) {
 			log.Printf("Unable to retrieve messages: %v", err)
 			return
 		}
-		allMessages = append(allMessages, r.Messages...)
+
+		for _, m := range r.Messages {
+			cache.mu.RLock()
+			item, exists := cache.Items[m.Id]
+			cache.mu.RUnlock()
+
+			// 1. If it already exists and is fully processed, just check for read status updates
+			if exists && item.Sender != "" && item.Body != "" {
+				msgMetadata, err := srv.Users.Messages.Get("me", m.Id).Format("metadata").Do()
+				if err == nil {
+					isUnread := false
+					for _, lbl := range msgMetadata.LabelIds {
+						if lbl == "UNREAD" {
+							isUnread = true
+							break
+						}
+					}
+					cache.mu.Lock()
+					item.IsRead = !isUnread
+					cache.mu.Unlock()
+				}
+				continue
+			}
+
+			// 2. Fetch metadata to check sender and if it's a valid newsletter
+			metadata, err := srv.Users.Messages.Get("me", m.Id).Format("metadata").MetadataHeaders("From", "Subject").Do()
+			if err != nil {
+				log.Printf("Unable to retrieve message metadata %v: %v", m.Id, err)
+				continue
+			}
+
+			from := ""
+			subject := ""
+			for _, h := range metadata.Payload.Headers {
+				if h.Name == "From" {
+					from = h.Value
+				} else if h.Name == "Subject" {
+					subject = h.Value
+				}
+			}
+			name, email := parseFrom(from)
+
+			// 3. SKIP if the sender is the user themselves (Filter replies/forwards)
+			if userEmail != "" && strings.EqualFold(email, userEmail) {
+				if !exists {
+					cache.GetOrCreateItem(m.Id)
+				}
+				continue
+			}
+
+			// 4. SKIP if it's clearly a human reply or forward (Subject starts with Re: or Fwd:)
+			lowerSub := strings.ToLower(subject)
+			if strings.HasPrefix(lowerSub, "re:") || strings.HasPrefix(lowerSub, "fwd:") {
+				if !exists {
+					cache.GetOrCreateItem(m.Id)
+				}
+				continue
+			}
+
+			// 5. Check if sender is excluded
+			cache.mu.RLock()
+			excluded := cache.ExcludedSenders[email]
+			cache.mu.RUnlock()
+			if excluded {
+				if !exists {
+					cache.GetOrCreateItem(m.Id)
+				}
+				continue
+			}
+
+			// 5. Process the message
+			fullMsg, err := srv.Users.Messages.Get("me", m.Id).Format("full").Do()
+			if err != nil {
+				log.Printf("Unable to retrieve message %v: %v", m.Id, err)
+				continue
+			}
+
+			log.Printf("PROCESSING NEWSLETTER: From='%s' Subject='%s' Msg=%s", from, fullMsg.Snippet, m.Id)
+			processMessage(srv, fullMsg)
+			newItems = true
+		}
+
 		pageToken = r.NextPageToken
 		if pageToken == "" {
 			break
 		}
-	}
-
-	if len(allMessages) == 0 {
-		return
-	}
-
-	// 2. Group by ThreadID and find the oldest message in each thread
-	// We need to fetch basic metadata to get the dates for sorting
-	type msgInfo struct {
-		msg  *gmail.Message
-		date int64
-	}
-	threads := make(map[string][]msgInfo)
-	
-	log.Printf("Analyzing %d messages for threads...", len(allMessages))
-	for _, m := range allMessages {
-		// We use a small cache check here to avoid over-fetching metadata for things we know
-		cache.mu.RLock()
-		item, exists := cache.Items[m.Id]
-		cache.mu.RUnlock()
-
-		var date int64
-		if exists && item.Timestamp.Unix() > 0 {
-			date = item.Timestamp.UnixMilli()
-		} else {
-			// Fetch minimal metadata to get the internal date
-			meta, err := srv.Users.Messages.Get("me", m.Id).Format("minimal").Do()
-			if err != nil {
-				continue
-			}
-			date = meta.InternalDate
-		}
-		threads[m.ThreadId] = append(threads[m.ThreadId], msgInfo{msg: m, date: date})
-	}
-
-	// 3. Process only the oldest message from each thread
-	for threadID, msgs := range threads {
-		// Find oldest
-		var oldest msgInfo
-		for i, m := range msgs {
-			if i == 0 || m.date < oldest.date {
-				oldest = m
-			}
-		}
-
-		m := oldest.msg
-		cache.mu.RLock()
-		item, exists := cache.Items[m.Id]
-		cache.mu.RUnlock()
-
-		// Skip if this specific message was already fully processed
-		if exists && item.Body != "" && item.Sender != "" {
-			// (Optional: Check read status updates)
-			continue
-		}
-
-		// Process this message
-		fullMsg, err := srv.Users.Messages.Get("me", m.Id).Format("full").Do()
-		if err != nil {
-			log.Printf("Unable to retrieve message %v: %v", m.Id, err)
-			continue
-		}
-
-		// Check if sender is excluded
-		from := ""
-		for _, h := range fullMsg.Payload.Headers {
-			if h.Name == "From" {
-				from = h.Value
-				break
-			}
-		}
-		_, email := parseFrom(from)
-		cache.mu.RLock()
-		excluded := cache.ExcludedSenders[email]
-		cache.mu.RUnlock()
-		
-		if excluded {
-			if !exists {
-				cache.GetOrCreateItem(m.Id)
-			}
-			continue
-		}
-
-		log.Printf("PROCESSING NEWSLETTER: Thread=%s Msg=%s Date=%v", threadID, m.Id, oldest.date)
-		processMessage(srv, fullMsg)
-		
-		// Record that this is the primary message for this thread
-		cache.mu.Lock()
-		cache.ProcessedThreads[threadID] = m.Id
-		cache.mu.Unlock()
-		
-		newItems = true
 	}
 
 	if newItems {
