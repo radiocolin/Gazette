@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"encoding/xml"
 	"fmt"
 	"log"
 	"net/http"
@@ -39,6 +40,27 @@ func registerGReaderHandlers(mux *http.ServeMux) {
 	mux.HandleFunc("/api/greader.php/reader/api/0/edit-tag", handleEditTag)
 }
 
+type RSS struct {
+	XMLName xml.Name    `xml:"rss"`
+	Version string      `xml:"version,attr"`
+	Channel *RSSChannel `xml:"channel"`
+}
+
+type RSSChannel struct {
+	Title       string    `xml:"title"`
+	Link        string    `xml:"link"`
+	Description string    `xml:"description"`
+	Items       []RSSItem `xml:"item"`
+}
+
+type RSSItem struct {
+	Title       string `xml:"title"`
+	Link        string `xml:"link"`
+	Description string `xml:"description"`
+	PubDate     string `xml:"pubDate"`
+	GUID        string `xml:"guid"`
+}
+
 func handleFeed(w http.ResponseWriter, r *http.Request) {
 	id := r.URL.Query().Get("id") // feed/email@example.com
 	if id == "" {
@@ -67,25 +89,33 @@ func handleFeed(w http.ResponseWriter, r *http.Request) {
 		return items[i].Timestamp.After(items[j].Timestamp)
 	})
 
-	w.Header().Set("Content-Type", "application/rss+xml; charset=utf-8")
-	fmt.Fprintf(w, "<?xml version=\"1.0\" encoding=\"UTF-8\" ?>\n")
-	fmt.Fprintf(w, "<rss version=\"2.0\">\n<channel>\n")
-	fmt.Fprintf(w, "  <title>%s</title>\n", sub.Title)
-	fmt.Fprintf(w, "  <link>%s</link>\n", strings.TrimSuffix(config.Gmail.PublicURL, "/"))
-	fmt.Fprintf(w, "  <description>Newsletters from %s</description>\n", sub.Title)
+	rss := RSS{
+		Version: "2.0",
+		Channel: &RSSChannel{
+			Title:       sub.Title,
+			Link:        strings.TrimSuffix(config.Gmail.PublicURL, "/"),
+			Description: "Newsletters from " + sub.Title,
+		},
+	}
 
 	for _, item := range items {
 		viewURL := fmt.Sprintf("%s/view?id=%s", strings.TrimSuffix(config.Gmail.PublicURL, "/"), item.HexID)
-		fmt.Fprintf(w, "  <item>\n")
-		fmt.Fprintf(w, "    <title>%s</title>\n", item.Subject)
-		fmt.Fprintf(w, "    <link>%s</link>\n", viewURL)
-		fmt.Fprintf(w, "    <description><![CDATA[%s]]></description>\n", item.Body)
-		fmt.Fprintf(w, "    <pubDate>%s</pubDate>\n", item.Timestamp.Format(time.RFC1123Z))
-		fmt.Fprintf(w, "    <guid>%s</guid>\n", item.HexID)
-		fmt.Fprintf(w, "  </item>\n")
+		rss.Channel.Items = append(rss.Channel.Items, RSSItem{
+			Title:       item.Subject,
+			Link:        viewURL,
+			Description: item.Body,
+			PubDate:     item.Timestamp.Format(time.RFC1123Z),
+			GUID:        item.HexID,
+		})
 	}
 
-	fmt.Fprintf(w, "</channel>\n</rss>")
+	w.Header().Set("Content-Type", "application/rss+xml; charset=utf-8")
+	w.Write([]byte(xml.Header))
+	enc := xml.NewEncoder(w)
+	enc.Indent("", "  ")
+	if err := enc.Encode(rss); err != nil {
+		log.Printf("Error encoding RSS: %v", err)
+	}
 }
 
 func handleView(w http.ResponseWriter, r *http.Request) {
