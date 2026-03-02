@@ -342,8 +342,13 @@ func cleanHTML(input string) string {
 	var f func(*html.Node)
 	f = func(n *html.Node) {
 		if n.Type == html.ElementNode {
+			tag := strings.ToLower(n.Data)
+			if tag == "style" || tag == "script" || tag == "head" {
+				return
+			}
+
 			allowed := false
-			switch strings.ToLower(n.Data) {
+			switch tag {
 			case "p", "br", "h1", "h2", "h3", "h4", "h5", "h6", "b", "i", "strong", "em", "ul", "ol", "li", "a", "img":
 				allowed = true
 			}
