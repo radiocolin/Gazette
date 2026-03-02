@@ -15,6 +15,7 @@ import (
 
 func registerGReaderHandlers(mux *http.ServeMux) {
 	// Standard paths
+	mux.HandleFunc("/view", handleView)
 	mux.HandleFunc("/accounts/ClientLogin", handleLogin)
 	mux.HandleFunc("/reader/api/0/token", handleToken)
 	mux.HandleFunc("/reader/api/0/tag/list", handleTagList)
@@ -25,6 +26,7 @@ func registerGReaderHandlers(mux *http.ServeMux) {
 	mux.HandleFunc("/reader/api/0/edit-tag", handleEditTag)
 
 	// FreshRSS specific paths
+	mux.HandleFunc("/api/greader.php/view", handleView)
 	mux.HandleFunc("/api/greader.php/accounts/ClientLogin", handleLogin)
 	mux.HandleFunc("/api/greader.php/reader/api/0/token", handleToken)
 	mux.HandleFunc("/api/greader.php/reader/api/0/tag/list", handleTagList)
@@ -33,6 +35,23 @@ func registerGReaderHandlers(mux *http.ServeMux) {
 	mux.HandleFunc("/api/greader.php/reader/api/0/stream/items/ids", handleItemIDs)
 	mux.HandleFunc("/api/greader.php/reader/api/0/stream/items/contents", handleItemContents)
 	mux.HandleFunc("/api/greader.php/reader/api/0/edit-tag", handleEditTag)
+}
+
+func handleView(w http.ResponseWriter, r *http.Request) {
+	id := r.URL.Query().Get("id")
+	if id == "" {
+		http.Error(w, "Missing ID", http.StatusBadRequest)
+		return
+	}
+
+	item := cache.GetItemByHex(id)
+	if item == nil {
+		http.Error(w, "Item not found", http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Write([]byte(item.Body))
 }
 
 func handleSubscriptionEdit(w http.ResponseWriter, r *http.Request) {
@@ -311,6 +330,7 @@ func handleItemContents(w http.ResponseWriter, r *http.Request) {
 		}
 
 		msec := item.Timestamp.UnixMilli()
+		viewURL := fmt.Sprintf("%s/view?id=%s", strings.TrimSuffix(config.Gmail.PublicURL, "/"), item.HexID)
 		entry := GEntry{
 			ID:            "tag:google.com,2005:reader/item/" + item.HexID,
 			Title:         item.Subject,
@@ -320,7 +340,7 @@ func handleItemContents(w http.ResponseWriter, r *http.Request) {
 			Author:        item.SenderName,
 			Summary:       map[string]string{"content": item.Body},
 			Content:       map[string]string{"content": item.Body},
-			Alternate:     []map[string]string{{"href": "https://mail.google.com/mail/u/0/#inbox/" + item.ID, "type": "text/html"}},
+			Alternate:     []map[string]string{{"href": viewURL, "type": "text/html"}},
 			Origin: map[string]string{
 				"streamId": "feed/" + item.Sender,
 				"title":    item.SenderName,
