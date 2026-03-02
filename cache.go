@@ -13,7 +13,6 @@ import (
 type Item struct {
 	ID         string            `json:"id"`
 	ThreadID   string            `json:"thread_id"`
-	HexID      string            `json:"hex_id"`
 	IntID      uint64            `json:"int_id"`
 	Sender     string            `json:"sender"`
 	SenderName string            `json:"sender_name"`
@@ -33,7 +32,6 @@ type Subscription struct {
 
 type Cache struct {
 	Items            map[string]*Item         `json:"items"`          // Gmail ID -> Item
-	HexToGmailID     map[string]string         `json:"hex_to_gmail"`   // Hex ID -> Gmail ID
 	IntToGmailID     map[uint64]string         `json:"int_to_gmail"`   // Int ID -> Gmail ID
 	Subscriptions    map[string]*Subscription `json:"subscriptions"` // Sender Email -> Subscription
 	ExcludedSenders  map[string]bool          `json:"excluded_senders"`
@@ -45,7 +43,6 @@ type Cache struct {
 func NewCache() *Cache {
 	c := &Cache{
 		Items:            make(map[string]*Item),
-		HexToGmailID:     make(map[string]string),
 		IntToGmailID:     make(map[uint64]string),
 		Subscriptions:    make(map[string]*Subscription),
 		ExcludedSenders:  make(map[string]bool),
@@ -64,7 +61,6 @@ func NewCache() *Cache {
 
 	// Ensure all maps are populated from Items if not loaded
 	for _, item := range c.Items {
-		c.HexToGmailID[item.HexID] = item.ID
 		c.IntToGmailID[item.IntID] = item.ID
 	}
 
@@ -116,26 +112,14 @@ func (c *Cache) GetOrCreateItem(gmailID string) *Item {
 
 	intID := c.NextIntID
 	c.NextIntID++
-	hexID := fmt.Sprintf("%016x", intID)
 
 	item := &Item{
 		ID:    gmailID,
-		HexID: hexID,
 		IntID: intID,
 	}
 	c.Items[gmailID] = item
-	c.HexToGmailID[hexID] = gmailID
 	c.IntToGmailID[intID] = gmailID
 	return item
-}
-
-func (c *Cache) GetItemByHex(hexID string) *Item {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	if gmailID, ok := c.HexToGmailID[hexID]; ok {
-		return c.Items[gmailID]
-	}
-	return nil
 }
 
 func (c *Cache) GetItemByInt(intID uint64) *Item {

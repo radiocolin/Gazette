@@ -141,11 +141,9 @@ func handleView(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	item := cache.GetItemByHex(id)
-	if item == nil {
-		if intID, err := strconv.ParseUint(id, 10, 64); err == nil {
-			item = cache.GetItemByInt(intID)
-		}
+	var item *Item
+	if intID, err := strconv.ParseUint(id, 10, 64); err == nil {
+		item = cache.GetItemByInt(intID)
 	}
 
 	if item == nil {
@@ -211,11 +209,9 @@ func handleEditTag(w http.ResponseWriter, r *http.Request) {
 			}
 
 			// Find the item
-			item := cache.GetItemByHex(cleanID)
-			if item == nil {
-				if intID, err := strconv.ParseUint(cleanID, 10, 64); err == nil {
-					item = cache.GetItemByInt(intID)
-				}
+			var item *Item
+			if intID, err := strconv.ParseUint(cleanID, 10, 64); err == nil {
+				item = cache.GetItemByInt(intID)
 			}
 
 			if item != nil && !item.IsRead {
@@ -410,12 +406,10 @@ func handleItemContents(w http.ResponseWriter, r *http.Request) {
 			cleanID = parts[len(parts)-1]
 		}
 
-		// Try to lookup by hex first, then by decimal
-		item := cache.GetItemByHex(cleanID)
-		if item == nil {
-			if intID, err := strconv.ParseUint(cleanID, 10, 64); err == nil {
-				item = cache.GetItemByInt(intID)
-			}
+		// Try to lookup by decimal
+		var item *Item
+		if intID, err := strconv.ParseUint(cleanID, 10, 64); err == nil {
+			item = cache.GetItemByInt(intID)
 		}
 
 		if item == nil {
@@ -429,7 +423,7 @@ func handleItemContents(w http.ResponseWriter, r *http.Request) {
 			body = item.Body
 		}
 		entry := GEntry{
-			ID:            "tag:google.com,2005:reader/item/" + fmt.Sprintf("%016x", item.IntID), // Keep hex for the reader tag if it expects it, but we standardized on decimal strings elsewhere. Actually, the 'id' in the JSON should match what was requested.
+			ID:            "tag:google.com,2005:reader/item/" + fmt.Sprintf("%d", item.IntID),
 			Title:         item.Subject,
 			Published:     float64(item.Timestamp.Unix()),
 			CrawlTimeMsec: msec,
