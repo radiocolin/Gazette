@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"sort"
@@ -15,6 +17,7 @@ import (
 
 func registerGReaderHandlers(mux *http.ServeMux) {
 	// Standard paths
+	mux.HandleFunc("/proxy", handleProxy)
 	mux.HandleFunc("/accounts/ClientLogin", handleLogin)
 	mux.HandleFunc("/reader/api/0/token", handleToken)
 	mux.HandleFunc("/reader/api/0/tag/list", handleTagList)
@@ -25,6 +28,7 @@ func registerGReaderHandlers(mux *http.ServeMux) {
 	mux.HandleFunc("/reader/api/0/edit-tag", handleEditTag)
 
 	// FreshRSS specific paths
+	mux.HandleFunc("/api/greader.php/reader/api/0/proxy", handleProxy)
 	mux.HandleFunc("/api/greader.php/accounts/ClientLogin", handleLogin)
 	mux.HandleFunc("/api/greader.php/reader/api/0/token", handleToken)
 	mux.HandleFunc("/api/greader.php/reader/api/0/tag/list", handleTagList)
@@ -33,6 +37,49 @@ func registerGReaderHandlers(mux *http.ServeMux) {
 	mux.HandleFunc("/api/greader.php/reader/api/0/stream/items/ids", handleItemIDs)
 	mux.HandleFunc("/api/greader.php/reader/api/0/stream/items/contents", handleItemContents)
 	mux.HandleFunc("/api/greader.php/reader/api/0/edit-tag", handleEditTag)
+}
+
+func handleProxy(w http.ResponseWriter, r *http.Request) {
+	u := r.URL.Query().Get("u")
+	if u == "" {
+		http.Error(w, "Missing URL", http.StatusBadRequest)
+		return
+	}
+
+	log.Printf("PROXY REQUEST: %s", u)
+
+	req, err := http.NewRequest("GET", u, nil)
+	if err != nil {
+		log.Printf("PROXY ERROR (NewRequest): %v", err)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	// Use a modern User-Agent to avoid being blocked by CDNs
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		log.Printf("PROXY ERROR (Do): %v", err)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer resp.Body.Close()
+
+	log.Printf("PROXY RESPONSE: %d %s", resp.StatusCode, resp.Header.Get("Content-Type"))
+
+	if resp.StatusCode != http.StatusOK {
+		http.Error(w, fmt.Sprintf("Remote server returned status: %d", resp.StatusCode), resp.StatusCode)
+		return
+	}
+
+	for k, v := range resp.Header {
+		if strings.EqualFold(k, "Content-Type") {
+			w.Header()[k] = v
+		}
+	}
+	w.Header().Set("Content-Disposition", "inline")
+	w.Header().Set("Cache-Control", "public, max-age=31536000") // Cache for 1 year
+	io.Copy(w, resp.Body)
 }
 
 func handleSubscriptionEdit(w http.ResponseWriter, r *http.Request) {

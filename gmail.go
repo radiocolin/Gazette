@@ -11,6 +11,7 @@ import (
 	"mime/quotedprintable"
 	"net/http"
 	"net/mail"
+	"net/url"
 	"os"
 	"regexp"
 	"strconv"
@@ -344,7 +345,6 @@ func processMessage(srv *gmail.Service, msg *gmail.Message) {
 
 func cleanNewsletterHTML(rawHTML string) string {
 	// 1. Aggressively strip MSO conditional blocks using regex before parsing.
-	// This covers both comment-wrapped <!--[if mso]> and downlevel-revealed <![if !mso]>
 	msoRegex := regexp.MustCompile(`(?is)(<!--\s*\[if\s+[^\]]+\]>.*?<!\[endif\]\s*-->|<!\[if\s+[^\]]+\]>.*?<!\[endif\]>)`)
 	rawHTML = msoRegex.ReplaceAllString(rawHTML, "")
 
@@ -353,18 +353,30 @@ func cleanNewsletterHTML(rawHTML string) string {
 		return rawHTML
 	}
 
-	// 2. Traversal to remove any remaining style, script, or xml tags
+	// 2. Traversal to remove any remaining script, xml, or meta tags
+	// and to rewrite image sources to go through our proxy
 	var clean func(*html.Node)
 	clean = func(n *html.Node) {
 		for c := n.FirstChild; c != nil; {
 			next := c.NextSibling
-			if n.Type == html.ElementNode && (n.Data == "style" || n.Data == "script" || n.Data == "xml" || n.Data == "meta") {
-				// This node itself should be removed, but we are inside the child loop.
-				// The parent will handle it.
-			}
 			
-			if c.Type == html.ElementNode && (c.Data == "style" || c.Data == "script" || c.Data == "xml" || c.Data == "meta") {
-				n.RemoveChild(c)
+			if c.Type == html.ElementNode {
+				if c.Data == "script" || c.Data == "xml" || c.Data == "meta" {
+					n.RemoveChild(c)
+				} else if c.Data == "img" {
+					for i, attr := range c.Attr {
+						if attr.Key == "src" && strings.HasPrefix(attr.Val, "http") {
+							proxied := fmt.Sprintf("/proxy?u=%s", url.QueryEscape(attr.Val))
+							c.Attr[i].Val = proxied
+							log.Printf("REWRITING IMAGE: %s -> %s", attr.Val, proxied)
+						} else if attr.Key == "srcset" {
+							c.Attr[i].Val = ""
+						}
+					}
+					clean(c)
+				} else {
+					clean(c)
+				}
 			} else {
 				clean(c)
 			}
