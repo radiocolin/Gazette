@@ -20,6 +20,7 @@ type Item struct {
 	Subject    string            `json:"subject"`
 	Snippet    string            `json:"snippet"`
 	Body       string            `json:"body"`
+	CleanBody  string            `json:"clean_body"`
 	CidMap     map[string]string `json:"cid_map"` // CID -> Base64 Data URI
 	Timestamp  time.Time         `json:"timestamp"`
 	IsRead     bool              `json:"is_read"`

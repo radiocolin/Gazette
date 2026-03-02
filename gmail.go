@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/net/html"
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
 	"google.golang.org/api/gmail/v1"
@@ -328,6 +329,55 @@ func processMessage(srv *gmail.Service, msg *gmail.Message) {
 	body := extractBody(srv, msg.Id, msg.Payload)
 	// Surgically strip only this specific tag
 	item.Body = strings.ReplaceAll(body, "<o:PixelsPerInch>96</o:PixelsPerInch>", "")
+	item.CleanBody = cleanHTML(item.Body)
+}
+
+func cleanHTML(input string) string {
+	doc, err := html.Parse(strings.NewReader(input))
+	if err != nil {
+		return input
+	}
+
+	var buf strings.Builder
+	var f func(*html.Node)
+	f = func(n *html.Node) {
+		if n.Type == html.ElementNode {
+			allowed := false
+			switch strings.ToLower(n.Data) {
+			case "p", "br", "h1", "h2", "h3", "h4", "h5", "h6", "b", "i", "strong", "em", "ul", "ol", "li", "a", "img":
+				allowed = true
+			}
+
+			if allowed {
+				buf.WriteString("<")
+				buf.WriteString(n.Data)
+				for _, a := range n.Attr {
+					if strings.ToLower(a.Key) == "href" || strings.ToLower(a.Key) == "src" {
+						buf.WriteString(fmt.Sprintf(" %s=\"%s\"", a.Key, a.Val))
+					}
+				}
+				buf.WriteString(">")
+			}
+
+			for c := n.FirstChild; c != nil; c = c.NextSibling {
+				f(c)
+			}
+
+			if allowed && n.Data != "br" && n.Data != "img" {
+				buf.WriteString("</")
+				buf.WriteString(n.Data)
+				buf.WriteString(">")
+			}
+		} else if n.Type == html.TextNode {
+			buf.WriteString(n.Data)
+		} else {
+			for c := n.FirstChild; c != nil; c = c.NextSibling {
+				f(c)
+			}
+		}
+	}
+	f(doc)
+	return buf.String()
 }
 
 func parseFrom(from string) (name, email string) {

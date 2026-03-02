@@ -109,10 +109,14 @@ func handleFeed(w http.ResponseWriter, r *http.Request) {
 
 	for _, item := range items {
 		viewURL := fmt.Sprintf("%s/view?id=%s", strings.TrimSuffix(config.Gmail.PublicURL, "/"), item.HexID)
+		body := item.CleanBody
+		if body == "" {
+			body = item.Body
+		}
 		rss.Channel.Items = append(rss.Channel.Items, RSSItem{
 			Title:       item.Subject,
 			Link:        viewURL,
-			Description: item.Body,
+			Description: body,
 			PubDate:     item.Timestamp.Format(time.RFC1123Z),
 			GUID: &RSSGUID{
 				Value:       item.HexID,
@@ -414,6 +418,10 @@ func handleItemContents(w http.ResponseWriter, r *http.Request) {
 
 		msec := item.Timestamp.UnixMilli()
 		viewURL := fmt.Sprintf("%s/view?id=%s", strings.TrimSuffix(config.Gmail.PublicURL, "/"), item.HexID)
+		body := item.CleanBody
+		if body == "" {
+			body = item.Body
+		}
 		entry := GEntry{
 			ID:            "tag:google.com,2005:reader/item/" + item.HexID,
 			Title:         item.Subject,
@@ -421,8 +429,8 @@ func handleItemContents(w http.ResponseWriter, r *http.Request) {
 			CrawlTimeMsec: msec,
 			TimestampUsec: msec * 1000,
 			Author:        item.SenderName,
-			Summary:       map[string]string{"content": item.Body},
-			Content:       map[string]string{"content": item.Body},
+			Summary:       map[string]string{"content": body},
+			Content:       map[string]string{"content": body},
 			Alternate:     []map[string]string{{"href": viewURL, "type": "text/html"}},
 			Origin: map[string]string{
 				"streamId": "feed/" + item.Sender,
