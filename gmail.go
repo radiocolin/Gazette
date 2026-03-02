@@ -330,12 +330,20 @@ func processMessage(srv *gmail.Service, msg *gmail.Message) {
 	}
 
 	// Extract body and collect CIDs
-	item.Body = extractBody(srv, msg.Id, msg.Payload)
+	body := extractBody(srv, msg.Id, msg.Payload)
+	item.Body = body
 	collectCids(srv, msg.Id, msg.Payload, item.CidMap)
 
 	// Replace CIDs in body with data URIs
 	for cid, dataURI := range item.CidMap {
 		item.Body = strings.ReplaceAll(item.Body, "cid:"+cid, dataURI)
+	}
+
+	// Prepend hidden snippet to force clean preview in RSS readers
+	// This fixes the "96" issue without stripping CSS or layouts.
+	if item.Snippet != "" {
+		safeSnippet := html.EscapeString(item.Snippet)
+		item.Body = fmt.Sprintf("<div style=\"display:none;font-size:1px;color:#fff;line-height:1px;max-height:0px;max-width:0px;opacity:0;overflow:hidden;\">%s</div>\n%s", safeSnippet, item.Body)
 	}
 
 	item.Body = cleanNewsletterHTML(item.Body)
@@ -347,23 +355,17 @@ func cleanNewsletterHTML(rawHTML string) string {
 		return rawHTML
 	}
 
-	// Traversal to remove problematic nodes
+	// Traversal to remove ONLY comments and XML nodes
 	var clean func(*html.Node)
 	clean = func(n *html.Node) {
 		for c := n.FirstChild; c != nil; {
 			next := c.NextSibling
 			
-			// Remove comments and specific meta/data tags that confuse preview generators
 			shouldRemove := false
 			if c.Type == html.CommentNode {
 				shouldRemove = true
-			} else if c.Type == html.ElementNode {
-				tag := strings.ToLower(c.Data)
-				if tag == "xml" || tag == "script" || tag == "style" || tag == "meta" || tag == "link" {
-					// We strip <style> too because we've already decoded the body
-					// and most RSS readers generate better snippets without it in the head.
-					shouldRemove = true
-				}
+			} else if c.Type == html.ElementNode && strings.ToLower(c.Data) == "xml" {
+				shouldRemove = true
 			}
 
 			if shouldRemove {
