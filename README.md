@@ -12,6 +12,10 @@ Gazette is a lightweight Gmail-to-RSS bridge designed specifically for reading n
 
 ## 🚀 Getting Started
 
+### 0. Prerequisites
+- A publicly resolvable domain (e.g., `gazette.yourdomain.com`).
+- An SSL certificate (Gazette is intended to run behind a reverse proxy like Nginx, Caddy, or Traefik that handles HTTPS). **Google OAuth will not work without a public HTTPS endpoint.**
+
 ### 1. Gmail API Setup
 
 1.  Go to the [Google Cloud Console](https://console.cloud.google.com/).
@@ -19,7 +23,6 @@ Gazette is a lightweight Gmail-to-RSS bridge designed specifically for reading n
 3.  Configure the **OAuth Consent Screen** (Internal or External).
 4.  Create **OAuth 2.0 Client IDs** (Web application).
     -   Add `https://your-public-domain.com/auth/callback` to the **Authorized redirect URIs**.
-    -   *Note: Google Console typically requires a publicly resolvable top-level domain (TLD) for Web Application redirect URIs. Raw IP addresses or localhost may be restricted or require HTTPS.*
 5.  Download your Client ID and Client Secret.
 
 ### 2. Configuration
@@ -30,11 +33,11 @@ Create a `config.yaml` in the project root:
 gmail:
   client_id: "YOUR_CLIENT_ID"
   client_secret: "YOUR_CLIENT_SECRET"
-  public_url: "http://localhost:8282" # Change if using a reverse proxy
-  label: "Newsletters"                # Optional: Filter by a specific Gmail label
-  polling_interval: 300               # 5 minutes
+  public_url: "https://gazette.yourdomain.com" # Must be HTTPS and publicly accessible
+  label: "Newsletters"                          # Optional: Filter by a specific Gmail label
+  polling_interval: 300                         # 5 minutes
   token_file: "/app/data/token.json"
-
+```
 server:
   port: 8080
   user: "admin"                       # For GReader ClientLogin
