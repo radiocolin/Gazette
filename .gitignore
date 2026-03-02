@@ -1,0 +1,11 @@
+# Binaries
+gazette
+gazette-bridge
+
+# Config and Data
+config.yaml
+data/
+*.json
+
+# OS files
+.DS_Store
