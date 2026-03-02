@@ -189,18 +189,29 @@ func handleEditTag(w http.ResponseWriter, r *http.Request) {
 
 	ids := r.Form["i"]
 	addTags := r.Form["a"]
-	
-	log.Printf("EDIT TAG REQUEST: IDs=%v AddTags=%v", ids, addTags)
+	removeTags := r.Form["r"]
 
-	isRead := false
+	log.Printf("EDIT TAG REQUEST: IDs=%v AddTags=%v RemoveTags=%v", ids, addTags, removeTags)
+
+	markRead := false
 	for _, a := range addTags {
 		if a == "user/-/state/com.google/read" {
-			isRead = true
+			markRead = true
+			break
+		}
+	}
+	markUnread := false
+	for _, rv := range removeTags {
+		if rv == "user/-/state/com.google/read" {
+			markUnread = true
 			break
 		}
 	}
 
-	if isRead {
+	if markRead {
+		var gmailIDs []string
+		var items []*Item
+
 		for _, id := range ids {
 			cleanID := id
 			if strings.Contains(id, "/") {
@@ -208,32 +219,85 @@ func handleEditTag(w http.ResponseWriter, r *http.Request) {
 				cleanID = parts[len(parts)-1]
 			}
 
-			// Find the item
-			var item *Item
 			if intID, err := strconv.ParseUint(cleanID, 10, 64); err == nil {
-				item = cache.GetItemByInt(intID)
-			}
-
-			if item != nil && !item.IsRead {
-				gmailMu.RLock()
-				svc := gmailSvc
-				gmailMu.RUnlock()
-
-				if svc != nil {
-					err := svc.Users.Messages.BatchModify("me", &gmail.BatchModifyMessagesRequest{
-						Ids:            []string{item.ID},
-						RemoveLabelIds: []string{"UNREAD"},
-					}).Do()
-					if err == nil {
-						cache.mu.Lock()
-						item.IsRead = true
-						cache.mu.Unlock()
-						log.Printf("MARKED READ IN GMAIL: %s", item.ID)
-					}
+				if item := cache.GetItemByInt(intID); item != nil && !item.IsRead {
+					gmailIDs = append(gmailIDs, item.ID)
+					items = append(items, item)
 				}
 			}
 		}
-		cache.Save()
+
+		if len(gmailIDs) > 0 {
+			gmailMu.RLock()
+			svc := gmailSvc
+			gmailMu.RUnlock()
+
+			if svc != nil {
+				_, err := withRetry(func() (interface{}, error) {
+					return nil, svc.Users.Messages.BatchModify("me", &gmail.BatchModifyMessagesRequest{
+						Ids:            gmailIDs,
+						RemoveLabelIds: []string{"UNREAD"},
+					}).Do()
+				})
+				if err == nil {
+					cache.mu.Lock()
+					for _, it := range items {
+						it.IsRead = true
+					}
+					cache.mu.Unlock()
+					log.Printf("MARKED %d ITEMS AS READ IN GMAIL", len(gmailIDs))
+					cache.Save()
+				} else {
+					log.Printf("Error batch marking read: %v", err)
+				}
+			}
+		}
+	}
+
+	if markUnread {
+		var gmailIDs []string
+		var items []*Item
+
+		for _, id := range ids {
+			cleanID := id
+			if strings.Contains(id, "/") {
+				parts := strings.Split(id, "/")
+				cleanID = parts[len(parts)-1]
+			}
+
+			if intID, err := strconv.ParseUint(cleanID, 10, 64); err == nil {
+				if item := cache.GetItemByInt(intID); item != nil && item.IsRead {
+					gmailIDs = append(gmailIDs, item.ID)
+					items = append(items, item)
+				}
+			}
+		}
+
+		if len(gmailIDs) > 0 {
+			gmailMu.RLock()
+			svc := gmailSvc
+			gmailMu.RUnlock()
+
+			if svc != nil {
+				_, err := withRetry(func() (interface{}, error) {
+					return nil, svc.Users.Messages.BatchModify("me", &gmail.BatchModifyMessagesRequest{
+						Ids:          gmailIDs,
+						AddLabelIds:  []string{"UNREAD"},
+					}).Do()
+				})
+				if err == nil {
+					cache.mu.Lock()
+					for _, it := range items {
+						it.IsRead = false
+					}
+					cache.mu.Unlock()
+					log.Printf("MARKED %d ITEMS AS UNREAD IN GMAIL", len(gmailIDs))
+					cache.Save()
+				} else {
+					log.Printf("Error batch marking unread: %v", err)
+				}
+			}
+		}
 	}
 
 	w.Header().Set("Content-Type", "text/plain")
