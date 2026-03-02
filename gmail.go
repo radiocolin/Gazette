@@ -67,7 +67,7 @@ func initGmail(ctx context.Context) {
 		return
 	}
 
-	profile, err := srv.Users.GetProfile("me").Do()
+	profile, err := svc.Users.GetProfile("me").Do()
 	if err == nil {
 		userEmail = profile.EmailAddress
 		log.Printf("Authenticated as: %s", userEmail)
@@ -178,7 +178,7 @@ func fetchMessages(ctx context.Context, srv *gmail.Service) {
 					subject = h.Value
 				}
 			}
-			name, email := parseFrom(from)
+			_, email := parseFrom(from)
 
 			// 3. SKIP if the sender is the user themselves (Filter replies/forwards)
 			if userEmail != "" && strings.EqualFold(email, userEmail) {
