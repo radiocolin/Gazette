@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -204,12 +206,16 @@ func handleItemIDs(w http.ResponseWriter, r *http.Request) {
 
 	stream := r.URL.Query().Get("s")
 	excludeTarget := r.URL.Query().Get("xt")
+	nStr := r.URL.Query().Get("n")
+	limit := 250
+	if n, err := strconv.Atoi(nStr); err == nil && n > 0 {
+		limit = n
+	}
 
 	type GItemRef struct {
 		ID string `json:"id"`
 	}
 
-	refs := []GItemRef{}
 	// Collect items
 	var items []*Item
 	for _, item := range cache.Items {
@@ -224,15 +230,17 @@ func handleItemIDs(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Sort items by timestamp (newest first)
-	for i := 0; i < len(items); i++ {
-		for j := i + 1; j < len(items); j++ {
-			if items[i].Timestamp.Before(items[j].Timestamp) {
-				items[i], items[j] = items[j], items[i]
-			}
-		}
+	// Efficient Sort
+	sort.Slice(items, func(i, j int) bool {
+		return items[i].Timestamp.After(items[j].Timestamp)
+	})
+
+	// Apply limit
+	if len(items) > limit {
+		items = items[:limit]
 	}
 
+	refs := []GItemRef{}
 	for _, item := range items {
 		refs = append(refs, GItemRef{ID: fmt.Sprintf("%d", item.IntID)})
 	}
