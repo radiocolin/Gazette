@@ -287,6 +287,8 @@ func incrementalSync(svc *gmail.Service) bool {
 			latestHistoryID = resp.HistoryId
 		}
 
+		log.Printf("Incremental sync: %d history records on this page", len(resp.History))
+
 		for _, record := range resp.History {
 			for _, added := range record.MessagesAdded {
 				msgID := added.Message.Id
@@ -313,10 +315,19 @@ func incrementalSync(svc *gmail.Service) bool {
 			for _, removed := range record.LabelsRemoved {
 				for _, lbl := range removed.LabelIds {
 					if lbl == "UNREAD" {
+						msgID := removed.Message.Id
 						cache.mu.Lock()
-						if item, exists := cache.Items[removed.Message.Id]; exists && item.Body != "" && !item.IsRead {
+						item, exists := cache.Items[msgID]
+						if !exists {
+							log.Printf("READ [history]: UNREAD removed for %s — not in cache", msgID)
+						} else if item.Body == "" {
+							log.Printf("READ [history]: UNREAD removed for %s — not fully processed", msgID)
+						} else if item.IsRead {
+							log.Printf("READ [history]: UNREAD removed for %s (%s) — already read", msgID, item.Subject)
+						} else {
 							item.IsRead = true
 							changed = true
+							log.Printf("READ [history]: Marked read: %s (%s)", msgID, item.Subject)
 						}
 						cache.mu.Unlock()
 					}
@@ -326,10 +337,19 @@ func incrementalSync(svc *gmail.Service) bool {
 			for _, added := range record.LabelsAdded {
 				for _, lbl := range added.LabelIds {
 					if lbl == "UNREAD" {
+						msgID := added.Message.Id
 						cache.mu.Lock()
-						if item, exists := cache.Items[added.Message.Id]; exists && item.Body != "" && item.IsRead {
+						item, exists := cache.Items[msgID]
+						if !exists {
+							log.Printf("READ [history]: UNREAD added for %s — not in cache", msgID)
+						} else if item.Body == "" {
+							log.Printf("READ [history]: UNREAD added for %s — not fully processed", msgID)
+						} else if !item.IsRead {
+							log.Printf("READ [history]: UNREAD added for %s (%s) — already unread", msgID, item.Subject)
+						} else {
 							item.IsRead = false
 							changed = true
+							log.Printf("READ [history]: Marked unread: %s (%s)", msgID, item.Subject)
 						}
 						cache.mu.Unlock()
 					}
@@ -542,9 +562,11 @@ func syncReadStatus(svc *gmail.Service) {
 		}
 		inUnreadSet := unreadIDs[item.ID]
 		if !item.IsRead && !inUnreadSet {
+			log.Printf("READ [full sync]: Marking read: %s (%s - %s)", item.ID, item.Sender, item.Subject)
 			item.IsRead = true
 			changed = true
 		} else if item.IsRead && inUnreadSet {
+			log.Printf("READ [full sync]: Marking unread: %s (%s - %s)", item.ID, item.Sender, item.Subject)
 			item.IsRead = false
 			changed = true
 		}
