@@ -158,9 +158,6 @@ type job struct {
 }
 
 func fetchMessages(ctx context.Context, srv *gmail.Service) {
-	gmailMu.Lock()
-	defer gmailMu.Unlock()
-
 	log.Printf("Fetching messages...")
 
 	query := ""

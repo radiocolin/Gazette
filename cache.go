@@ -33,6 +33,7 @@ type Subscription struct {
 type Cache struct {
 	Items            map[string]*Item         `json:"items"`          // Gmail ID -> Item
 	HexToGmailID     map[string]string         `json:"hex_to_gmail"`   // Hex ID -> Gmail ID
+	IntToGmailID     map[uint64]string         `json:"int_to_gmail"`   // Int ID -> Gmail ID
 	Subscriptions    map[string]*Subscription `json:"subscriptions"` // Sender Email -> Subscription
 	ExcludedSenders  map[string]bool          `json:"excluded_senders"`
 	ProcessedThreads map[string]string        `json:"processed_threads"` // ThreadID -> First MessageID
@@ -44,6 +45,7 @@ func NewCache() *Cache {
 	c := &Cache{
 		Items:            make(map[string]*Item),
 		HexToGmailID:     make(map[string]string),
+		IntToGmailID:     make(map[uint64]string),
 		Subscriptions:    make(map[string]*Subscription),
 		ExcludedSenders:  make(map[string]bool),
 		ProcessedThreads: make(map[string]string),
@@ -53,6 +55,16 @@ func NewCache() *Cache {
 
 	if c.ProcessedThreads == nil {
 		c.ProcessedThreads = make(map[string]string)
+	}
+
+	if c.IntToGmailID == nil {
+		c.IntToGmailID = make(map[uint64]string)
+	}
+
+	// Ensure all maps are populated from Items if not loaded
+	for _, item := range c.Items {
+		c.HexToGmailID[item.HexID] = item.ID
+		c.IntToGmailID[item.IntID] = item.ID
 	}
 
 	// Cleanup existing titles
@@ -79,15 +91,17 @@ func (c *Cache) load() {
 
 func (c *Cache) Save() {
 	c.mu.RLock()
-	defer c.mu.RUnlock()
-	f, err := os.Create("/app/data/cache.json")
+	data, err := json.Marshal(c)
+	c.mu.RUnlock()
+
 	if err != nil {
-		log.Printf("Error saving cache: %v", err)
+		log.Printf("Error encoding cache: %v", err)
 		return
 	}
-	defer f.Close()
-	if err := json.NewEncoder(f).Encode(c); err != nil {
-		log.Printf("Error encoding cache: %v", err)
+
+	err = os.WriteFile("/app/data/cache.json", data, 0644)
+	if err != nil {
+		log.Printf("Error saving cache: %v", err)
 	}
 }
 
@@ -110,6 +124,7 @@ func (c *Cache) GetOrCreateItem(gmailID string) *Item {
 	}
 	c.Items[gmailID] = item
 	c.HexToGmailID[hexID] = gmailID
+	c.IntToGmailID[intID] = gmailID
 	return item
 }
 
@@ -117,6 +132,15 @@ func (c *Cache) GetItemByHex(hexID string) *Item {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	if gmailID, ok := c.HexToGmailID[hexID]; ok {
+		return c.Items[gmailID]
+	}
+	return nil
+}
+
+func (c *Cache) GetItemByInt(intID uint64) *Item {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if gmailID, ok := c.IntToGmailID[intID]; ok {
 		return c.Items[gmailID]
 	}
 	return nil

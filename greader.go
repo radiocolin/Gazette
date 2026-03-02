@@ -94,6 +94,10 @@ func handleFeed(w http.ResponseWriter, r *http.Request) {
 		return items[i].Timestamp.After(items[j].Timestamp)
 	})
 
+	if len(items) > 100 {
+		items = items[:100]
+	}
+
 	rss := RSS{
 		Version: "2.0",
 		Channel: &RSSChannel{
@@ -197,19 +201,12 @@ func handleEditTag(w http.ResponseWriter, r *http.Request) {
 			}
 
 			// Find the item
-			var item *Item
-			cache.mu.RLock()
-			if gmailID, ok := cache.HexToGmailID[cleanID]; ok {
-				item = cache.Items[gmailID]
-			} else {
-				for _, it := range cache.Items {
-					if fmt.Sprintf("%d", it.IntID) == cleanID {
-						item = it
-						break
-					}
+			item := cache.GetItemByHex(cleanID)
+			if item == nil {
+				if intID, err := strconv.ParseUint(cleanID, 10, 64); err == nil {
+					item = cache.GetItemByInt(intID)
 				}
 			}
-			cache.mu.RUnlock()
 
 			if item != nil && !item.IsRead {
 				gmailMu.RLock()
@@ -377,16 +374,17 @@ func handleItemContents(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ids := r.Form["i"]
-	cache.mu.RLock()
-	defer cache.mu.RUnlock()
+	if len(ids) > 250 {
+		ids = ids[:250]
+	}
 
 	type GEntry struct {
-		ID            string   `json:"id"`
-		Title         string   `json:"title"`
-		Published     float64  `json:"published"`
-		CrawlTimeMsec int64    `json:"crawlTimeMsec,string"`
-		TimestampUsec int64    `json:"timestampUsec,string"`
-		Author        string   `json:"author"`
+		ID            string              `json:"id"`
+		Title         string              `json:"title"`
+		Published     float64             `json:"published"`
+		CrawlTimeMsec int64               `json:"crawlTimeMsec,string"`
+		TimestampUsec int64               `json:"timestampUsec,string"`
+		Author        string              `json:"author"`
 		Summary       map[string]string   `json:"summary"`
 		Content       map[string]string   `json:"content"`
 		Alternate     []map[string]string `json:"alternate"`
@@ -402,22 +400,12 @@ func handleItemContents(w http.ResponseWriter, r *http.Request) {
 			cleanID = parts[len(parts)-1]
 		}
 
-		// Try to lookup by hex first
+		// Try to lookup by hex first, then by decimal
 		item := cache.GetItemByHex(cleanID)
 		if item == nil {
-			// If not found, try lookup by decimal (NNW might send decimal)
-			var gmailID string
-			cache.mu.RLock()
-			for _, it := range cache.Items {
-				if fmt.Sprintf("%d", it.IntID) == cleanID {
-					gmailID = it.ID
-					break
-				}
+			if intID, err := strconv.ParseUint(cleanID, 10, 64); err == nil {
+				item = cache.GetItemByInt(intID)
 			}
-			if gmailID != "" {
-				item = cache.Items[gmailID]
-			}
-			cache.mu.RUnlock()
 		}
 
 		if item == nil {

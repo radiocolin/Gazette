@@ -69,8 +69,11 @@ func main() {
 	})
 
 	srv := &http.Server{
-		Addr:    fmt.Sprintf(":%d", config.Server.Port),
-		Handler: loggingMux,
+		Addr:         fmt.Sprintf(":%d", config.Server.Port),
+		Handler:      loggingMux,
+		ReadTimeout:  30 * time.Second,
+		WriteTimeout: 120 * time.Second,
+		IdleTimeout:  120 * time.Second,
 	}
 
 	go func() {
