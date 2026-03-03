@@ -26,10 +26,11 @@ import (
 )
 
 var (
-	gmailSvc   *gmail.Service
-	gmailMu    sync.RWMutex
-	oauthConf  *oauth2.Config
-	userEmail  string
+	gmailSvc        *gmail.Service
+	gmailMu         sync.RWMutex
+	oauthConf       *oauth2.Config
+	userEmail       string
+	newsletterLabelID string
 )
 
 func initGmail(ctx context.Context) {
@@ -75,6 +76,23 @@ func initGmail(ctx context.Context) {
 	if err == nil {
 		userEmail = profile.EmailAddress
 		log.Printf("Authenticated as: %s", userEmail)
+	}
+
+	if config.Gmail.Label != "" {
+		if labels, err := svc.Users.Labels.List("me").Do(); err == nil {
+			for _, l := range labels.Labels {
+				if strings.EqualFold(l.Name, config.Gmail.Label) {
+					newsletterLabelID = l.Id
+					log.Printf("Resolved label %q to ID %s", config.Gmail.Label, l.Id)
+					break
+				}
+			}
+			if newsletterLabelID == "" {
+				log.Printf("Warning: label %q not found in Gmail", config.Gmail.Label)
+			}
+		} else {
+			log.Printf("Warning: could not resolve label ID: %v", err)
+		}
 	}
 
 	gmailMu.Lock()
@@ -274,6 +292,9 @@ func incrementalSync(svc *gmail.Service) bool {
 			StartHistoryId(histID).
 			HistoryTypes("messageAdded", "labelAdded", "labelRemoved").
 			MaxResults(500)
+		if newsletterLabelID != "" {
+			req = req.LabelId(newsletterLabelID)
+		}
 		if pageToken != "" {
 			req = req.PageToken(pageToken)
 		}
