@@ -20,6 +20,9 @@ Gazette is a lightweight Gmail-to-RSS bridge designed specifically for reading n
 1.  Go to the [Google Cloud Console](https://console.cloud.google.com/).
 2.  Create a new project and enable the **Gmail API**.
 3.  Configure the **OAuth Consent Screen** (Internal or External).
+    - Add the following scopes:
+      - `https://www.googleapis.com/auth/gmail.readonly`
+      - `https://www.googleapis.com/auth/gmail.modify`
 4.  Create **OAuth 2.0 Client IDs** (Web application).
     -   Add `https://gazette.yourdomain.com/auth/callback` to the **Authorized redirect URIs**.
 5.  Download your Client ID and Client Secret.

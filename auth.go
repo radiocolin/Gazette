@@ -60,7 +60,12 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 					<ul>
 						<li>Select <b>External</b>.</li>
 						<li>Fill in the app name and your email.</li>
-						<li>Add the scope: <code>.../auth/gmail.modify</code> (allows marking as read).</li>
+						<li>Add the scopes:
+							<ul>
+								<li><code>.../auth/gmail.readonly</code></li>
+								<li><code>.../auth/gmail.modify</code></li>
+							</ul>
+						</li>
 						<li>Add your email as a <b>Test User</b> (required while in "Testing" mode).</li>
 					</ul>
 				</li>
