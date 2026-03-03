@@ -1,3 +1,5 @@
+![NetNewsWire](netnewswire.png)
+
 # 🗞️ Gazette
 
 Gazette is a lightweight Gmail-to-RSS bridge designed specifically for reading newsletters in standard RSS readers (like NetNewsWire, Reeder, or FreshRSS). It polls your Gmail for newsletters, strips out the tracking scripts and complex CSS, and serves them as a clean, readable feed.
