@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"strings"
@@ -20,12 +21,26 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/" {
 		return
 	}
-	
+
 	gmailMu.RLock()
 	svc := gmailSvc
+	failed := authFailed
 	gmailMu.RUnlock()
 
 	w.Header().Set("Content-Type", "text/html")
+
+	if failed {
+		fmt.Fprintf(w, `
+			<html>
+			<head><style>body{font-family:sans-serif; line-height:1.5; max-width:800px; margin:40px auto; padding:0 20px; color:#333;}</style></head>
+			<body>
+				<h1>GazetteBridge Status: <span style="color:red">Authentication Required</span></h1>
+				<p>Your Gmail token has expired or been revoked. Please re-authorize to resume syncing.</p>
+				<a href="/auth/login" style="display:inline-block; padding:10px 20px; background:#4285F4; color:white; text-decoration:none; border-radius:5px; font-weight:bold;">Re-authorize with Google</a>
+			</body></html>`)
+		return
+	}
+
 	if svc != nil {
 		fmt.Fprintf(w, `
 			<html>
@@ -111,15 +126,13 @@ func handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
 
 	saveToken(config.Gmail.TokenFile, tok)
 
-	svc, err := gmail.NewService(r.Context(), option.WithHTTPClient(oauthConf.Client(r.Context(), tok)))
+	svc, err := gmail.NewService(context.Background(), option.WithHTTPClient(oauthConf.Client(context.Background(), tok)))
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Service init failed: %v", err), http.StatusInternalServerError)
 		return
 	}
 
-	gmailMu.Lock()
-	gmailSvc = svc
-	gmailMu.Unlock()
+	activateGmailService(svc)
 
 	http.Redirect(w, r, "/", http.StatusTemporaryRedirect)
 }

@@ -40,6 +40,8 @@ type Cache struct {
 	mu               sync.RWMutex
 }
 
+const gazetteEmail = "gazette"
+
 func NewCache() *Cache {
 	c := &Cache{
 		Items:            make(map[string]*Item),
@@ -66,10 +68,59 @@ func NewCache() *Cache {
 
 	// Cleanup existing titles
 	for _, s := range c.Subscriptions {
-		s.Title = strings.Trim(s.Title, "\" '“”")
+		s.Title = strings.Trim(s.Title, "\" '")
+	}
+
+	// Gazette system feed is always present
+	if _, ok := c.Subscriptions[gazetteEmail]; !ok {
+		c.Subscriptions[gazetteEmail] = &Subscription{
+			ID:    "feed/" + gazetteEmail,
+			Title: "Gazette",
+		}
 	}
 
 	return c
+}
+
+// PostSystemNotification upserts a system notification in the Gazette feed.
+// Calling it with the same id replaces the previous notification with that id.
+func (c *Cache) PostSystemNotification(id, subject, body string) {
+	itemID := "gazette-" + id
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	item, exists := c.Items[itemID]
+	if !exists {
+		intID := c.NextIntID
+		c.NextIntID++
+		item = &Item{
+			ID:    itemID,
+			IntID: intID,
+		}
+		c.Items[itemID] = item
+		c.IntToGmailID[intID] = itemID
+	}
+
+	item.Sender = gazetteEmail
+	item.SenderName = "Gazette"
+	item.Subject = subject
+	item.CleanBody = body
+	item.IsRead = false
+	item.Timestamp = time.Now()
+}
+
+// RemoveSystemNotification removes a previously posted system notification.
+func (c *Cache) RemoveSystemNotification(id string) {
+	itemID := "gazette-" + id
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if item, ok := c.Items[itemID]; ok {
+		delete(c.IntToGmailID, item.IntID)
+		delete(c.Items, itemID)
+	}
 }
 
 func (c *Cache) load() {

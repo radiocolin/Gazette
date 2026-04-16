@@ -26,11 +26,12 @@ import (
 )
 
 var (
-	gmailSvc        *gmail.Service
-	gmailMu         sync.RWMutex
-	oauthConf       *oauth2.Config
-	userEmail       string
+	gmailSvc          *gmail.Service
+	gmailMu           sync.RWMutex
+	oauthConf         *oauth2.Config
+	userEmail         string
 	newsletterLabelID string
+	authFailed        bool
 )
 
 func initGmail(ctx context.Context) {
@@ -72,13 +73,26 @@ func initGmail(ctx context.Context) {
 		return
 	}
 
+	activateGmailService(svc)
+}
+
+// activateGmailService resolves the user profile and label ID from a freshly
+// created service, then installs it as the active gmailSvc. Called both on
+// startup (initGmail) and after a re-auth callback.
+func activateGmailService(svc *gmail.Service) {
 	profile, err := svc.Users.GetProfile("me").Do()
-	if err == nil {
+	if err != nil {
+		if handleAuthError(err) {
+			return
+		}
+		log.Printf("Warning: could not get Gmail profile: %v", err)
+	} else {
 		userEmail = profile.EmailAddress
 		log.Printf("Authenticated as: %s", userEmail)
 	}
 
 	if config.Gmail.Label != "" {
+		newsletterLabelID = ""
 		if labels, err := svc.Users.Labels.List("me").Do(); err == nil {
 			for _, l := range labels.Labels {
 				if strings.EqualFold(l.Name, config.Gmail.Label) {
@@ -97,7 +111,11 @@ func initGmail(ctx context.Context) {
 
 	gmailMu.Lock()
 	gmailSvc = svc
+	authFailed = false
 	gmailMu.Unlock()
+
+	cache.RemoveSystemNotification("auth-expired")
+	cache.Save()
 }
 
 func tokenFromFile(file string) (*oauth2.Token, error) {
@@ -120,6 +138,40 @@ func saveToken(path string, token *oauth2.Token) {
 	}
 	defer f.Close()
 	json.NewEncoder(f).Encode(token)
+}
+
+// handleAuthError checks if err is an OAuth auth failure and, if so,
+// clears the stale token and Gmail service so the user is prompted to re-auth.
+func handleAuthError(err error) bool {
+	if err == nil {
+		return false
+	}
+	isAuthErr := strings.Contains(err.Error(), "invalid_grant")
+	if !isAuthErr {
+		if gerr, ok := err.(*googleapi.Error); ok && gerr.Code == 401 {
+			isAuthErr = true
+		}
+	}
+	if !isAuthErr {
+		return false
+	}
+	log.Printf("AUTH REVOKED: Token has been expired or revoked. Clearing credentials. Visit %s/auth/login to re-authenticate.", config.Gmail.PublicURL)
+	os.Remove(config.Gmail.TokenFile)
+	gmailMu.Lock()
+	gmailSvc = nil
+	authFailed = true
+	gmailMu.Unlock()
+
+	loginURL := strings.TrimSuffix(config.Gmail.PublicURL, "/") + "/auth/login"
+	body := fmt.Sprintf(
+		`<p>Your Gmail authorization has expired or been revoked. Gazette has paused syncing.</p>`+
+			`<p><a href="%s" style="display:inline-block;padding:10px 20px;background:#4285F4;color:white;text-decoration:none;border-radius:5px;font-weight:bold;">Re-authorize with Google</a></p>`,
+		loginURL,
+	)
+	cache.PostSystemNotification("auth-expired", "Action Required: Re-authorize Gmail", body)
+	cache.Save()
+
+	return true
 }
 
 func withRetry[T any](fn func() (T, error)) (T, error) {
@@ -308,6 +360,7 @@ func incrementalSync(svc *gmail.Service) bool {
 				return false
 			}
 			log.Printf("Error fetching history: %v", err)
+			handleAuthError(err)
 			return true
 		}
 
@@ -432,6 +485,7 @@ func fullMessageSync(svc *gmail.Service) {
 		})
 		if err != nil {
 			log.Printf("Error listing messages: %v", err)
+			handleAuthError(err)
 			return
 		}
 
@@ -567,6 +621,7 @@ func syncReadStatus(svc *gmail.Service) {
 		})
 		if err != nil {
 			log.Printf("Error listing unread messages: %v", err)
+			handleAuthError(err)
 			return
 		}
 

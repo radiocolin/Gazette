@@ -166,6 +166,11 @@ func handleSubscriptionEdit(w http.ResponseWriter, r *http.Request) {
 
 	if action == "unsubscribe" && strings.HasPrefix(streamID, "feed/") {
 		email := strings.TrimPrefix(streamID, "feed/")
+		if email == gazetteEmail {
+			w.Header().Set("Content-Type", "text/plain")
+			fmt.Fprintf(w, "OK")
+			return
+		}
 		cache.mu.Lock()
 		if cache.ExcludedSenders == nil {
 			cache.ExcludedSenders = make(map[string]bool)
@@ -221,8 +226,14 @@ func handleEditTag(w http.ResponseWriter, r *http.Request) {
 
 			if intID, err := strconv.ParseUint(cleanID, 16, 64); err == nil {
 				if item := cache.GetItemByInt(intID); item != nil && !item.IsRead {
-					gmailIDs = append(gmailIDs, item.ID)
-					items = append(items, item)
+					if item.Sender == gazetteEmail {
+						cache.mu.Lock()
+						item.IsRead = true
+						cache.mu.Unlock()
+					} else {
+						gmailIDs = append(gmailIDs, item.ID)
+						items = append(items, item)
+					}
 				}
 			}
 		}
@@ -267,8 +278,14 @@ func handleEditTag(w http.ResponseWriter, r *http.Request) {
 
 			if intID, err := strconv.ParseUint(cleanID, 16, 64); err == nil {
 				if item := cache.GetItemByInt(intID); item != nil && item.IsRead {
-					gmailIDs = append(gmailIDs, item.ID)
-					items = append(items, item)
+					if item.Sender == gazetteEmail {
+						cache.mu.Lock()
+						item.IsRead = false
+						cache.mu.Unlock()
+					} else {
+						gmailIDs = append(gmailIDs, item.ID)
+						items = append(items, item)
+					}
 				}
 			}
 		}
